@@ -1,0 +1,48 @@
+# gaussdb-ro-mcp 配置文件示例
+# 复制为 gaussdb-ro-mcp.yaml 后按需修改。
+# 支持在一个文件中配置多个 GaussDB 实例；工具调用时通过 instance 参数选择。
+
+server:
+  # MCP 服务器名称（对客户端可见），默认 gaussdb-readonly
+  name: gaussdb-readonly
+  # execute_select 默认返回的最大行数
+  max_rows: 500
+  # 单次调用通过 max_rows 参数可放宽到的硬上限
+  max_rows_cap: 10000
+  # 服务端语句超时（会被设置为会话 statement_timeout，毫秒级生效）
+  statement_timeout: 30s
+  # 建立 TCP 连接超时
+  connect_timeout: 10s
+  # 危险函数黑名单（前缀匹配）。非空时覆盖内置默认值；
+  # 内置默认包含：set_config、setval、nextval、dblink*、lo_import*、
+  # pg_read_file*、pg_terminate_backend、pg_advisory_* 等。
+  # blocked_functions: ["dblink*", "gs_backup*"]
+
+instances:
+  # 方式一：拆分字段（推荐，避免密码出现在 URL 中被日志记录）
+  - name: prod
+    host: 192.168.0.10
+    port: 8000
+    database: postgres
+    user: readonly_user
+    password: "your-strong-password"
+    # 内网非 SSL 环境保持默认 disable；如需加密可改为 require/verify-ca/verify-full
+    sslmode: disable
+    # 可选：每实例覆盖 max_rows / statement_timeout / 连接池大小
+    max_rows: 300
+    statement_timeout: 20s
+    pool_max_conns: 4
+
+  # 方式二：完整 DSN（gaussdb:// 或 key=value 形式均可）
+  - name: dev
+    dsn: "gaussdb://readonly_user:password@192.168.1.20:5432/appdb?sslmode=disable"
+    # 追加额外连接参数
+    options:
+      - "application_name=gaussdb-ro-mcp"
+
+  # 方式三：key=value 连接串
+  - name: analytics
+    dsn: "host=192.168.2.30 port=8000 dbname=report user=ro password=pwd sslmode=disable"
+
+# 未在工具调用中指定 instance 参数时使用的实例
+default_instance: prod
