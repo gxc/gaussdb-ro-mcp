@@ -23,6 +23,8 @@ func testDSN(t *testing.T) string {
 
 // TestEnforceReadOnlyBlocksWrites 验证会话层防护：即使 SQL 校验层被绕过，
 // 服务端的 READ ONLY 会话也会拒绝一切写操作。
+// 注意：此处用裸 DSN 直连（未带启动参数），会走 enforceReadOnly 的
+// "回读校验未生效 → ROLLBACK + 会话级 SET 回退" 分支。
 func TestEnforceReadOnlyBlocksWrites(t *testing.T) {
 	dsn := testDSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

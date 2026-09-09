@@ -12,7 +12,7 @@
 | 层级 | 机制 | 说明 |
 | --- | --- | --- |
 | 1. SQL 静态校验 | `internal/guard` | 仅放行**单条** `SELECT`/`WITH` 查询：拒绝 DML/DDL（含 CTE 内写语句）、`SELECT ... INTO`、`FOR UPDATE/SHARE` 行锁、多语句、危险函数（`dblink*`、`set_config`、`setval`、`pg_read_file*`、`pg_terminate_backend`、`pg_advisory_*`、大对象写等，可配置）。词法分析正确跳过字符串/注释/引号标识符，避免误报 |
-| 2. 会话级强制 | `internal/db` | 每条连接入池前执行 `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` + `SET statement_timeout`，并回读 `SHOW transaction_read_only` 验证为 `on`，否则拒绝入池。即使第 1 层被绕过，服务端也会拒绝一切写入（包括函数内部的写） |
+| 2. 会话级强制 | `internal/db` | 连接建立时经启动参数下发 `default_transaction_read_only=on`，在会话初始化时（任何事务开始之前）生效——GaussDB 内核禁止在事务中修改该参数（SQLSTATE 55P02），故不能建连后再 `SET`。入池前回读 `SHOW transaction_read_only` 验证为 `on`，否则清理残留事务并回退会话级 `SET` 重试，仍失败则拒绝入池；另设 `SET statement_timeout`。即使第 1 层被绕过，服务端也会拒绝一切写入（包括函数内部的写） |
 | 3. 部署建议 | README | 建议使用仅授予 `SELECT` 权限的数据库账号（见下文），实现权限最小化 |
 
 ## 提供的 MCP 工具

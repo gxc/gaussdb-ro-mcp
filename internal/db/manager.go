@@ -1,11 +1,10 @@
 // Package db 管理多个 GaussDB 实例的连接池，并在会话层强制只读。
 //
-// 每条新连接建立后立即执行：
-//
-//	SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY
-//	SET statement_timeout = <ms>
-//
-// 并回读 SHOW transaction_read_only 验证确为 on，否则拒绝该连接入池。
+// 只读通过启动参数 default_transaction_read_only=on 实现：随连接建立
+// （startup packet）在会话初始化时下发，先于任何事务生效。GaussDB 内核
+// 禁止在事务中修改该参数（SQLSTATE 55P02），因此不能依赖建连后再执行
+// SET。入池前回读 SHOW transaction_read_only 校验，未生效时清理残留事务
+// 并回退为会话级 SET 重试，仍不为 on 则拒绝该连接入池。
 // 这是只读防护的最终兜底：即使 SQL 校验被绕过，服务端也会拒绝写入。
 package db
 
@@ -74,7 +73,12 @@ func newInstance(ctx context.Context, icfg *config.Instance, cfg *config.Config)
 	poolCfg.MinConns = 0
 	poolCfg.ConnConfig.ConnectTimeout = time.Duration(cfg.Server.ConnectTimeout)
 
-	// 会话级只读强制：对每条入池连接生效，并由服务端验证。
+	// 会话级只读强制：default_transaction_read_only=on 随启动包下发，在
+	// 会话初始化时（任何事务开始之前）生效。GaussDB 禁止在事务中修改该
+	// 参数（SQLSTATE 55P02），故不能在建连后再 SET。
+	poolCfg.ConnConfig.RuntimeParams["default_transaction_read_only"] = "on"
+
+	// 对每条入池连接校验只读已生效，并设置 statement_timeout。
 	poolCfg.AfterConnect = func(ctx context.Context, conn *gaussdbgo.Conn) error {
 		return enforceReadOnly(ctx, conn, time.Duration(icfg.StatementTimeout))
 	}
@@ -92,24 +96,44 @@ func newInstance(ctx context.Context, icfg *config.Instance, cfg *config.Config)
 	}, nil
 }
 
-// enforceReadOnly 将连接设为只读会话并验证。
+// enforceReadOnly 校验连接确为只读会话；未生效时回退为会话级 SET 后重试，
+// 仍不满足则返回错误（调用方将拒绝该连接入池）。
 func enforceReadOnly(ctx context.Context, conn *gaussdbgo.Conn, stmtTimeout time.Duration) error {
-	if _, err := conn.Exec(ctx, "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY"); err != nil {
-		return fmt.Errorf("设置只读会话失败: %w", err)
-	}
 	if stmtTimeout > 0 {
 		if _, err := conn.Exec(ctx, fmt.Sprintf("SET statement_timeout = %d", stmtTimeout.Milliseconds())); err != nil {
 			return fmt.Errorf("设置 statement_timeout 失败: %w", err)
 		}
 	}
-	var ro string
-	if err := conn.QueryRow(ctx, "SHOW transaction_read_only").Scan(&ro); err != nil {
-		return fmt.Errorf("验证只读状态失败: %w", err)
+
+	// default_transaction_read_only=on 已随启动包下发（见 newInstance），
+	// 此处仅回读校验。
+	if ro, err := showTransactionReadOnly(ctx, conn); err == nil && strings.EqualFold(ro, "on") {
+		return nil
+	}
+
+	// 回退路径：启动参数未生效（个别代理会剥离启动参数），或服务端复用的
+	// 会话残留了未结束的事务（此时 SET 该参数会报 55P02）。先 ROLLBACK
+	// 清理（空闲会话仅产生 WARNING），再以会话级 SET 兜底，最后重新校验。
+	_, _ = conn.Exec(ctx, "ROLLBACK")
+	if _, err := conn.Exec(ctx, "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY"); err != nil {
+		return fmt.Errorf("设置只读会话失败: %w", err)
+	}
+	ro, err := showTransactionReadOnly(ctx, conn)
+	if err != nil {
+		return err
 	}
 	if !strings.EqualFold(ro, "on") {
 		return fmt.Errorf("只读会话验证失败：transaction_read_only=%s，拒绝该连接", ro)
 	}
 	return nil
+}
+
+func showTransactionReadOnly(ctx context.Context, conn *gaussdbgo.Conn) (string, error) {
+	var ro string
+	if err := conn.QueryRow(ctx, "SHOW transaction_read_only").Scan(&ro); err != nil {
+		return "", fmt.Errorf("验证只读状态失败: %w", err)
+	}
+	return ro, nil
 }
 
 // Resolve 按名称取实例；name 为空时返回默认实例。
