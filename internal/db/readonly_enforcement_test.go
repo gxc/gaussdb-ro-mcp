@@ -8,6 +8,8 @@ import (
 	"time"
 
 	gaussdbgo "github.com/HuaweiCloudDeveloper/gaussdb-go"
+
+	"gaussdb-ro-mcp/internal/config"
 )
 
 // testDSN 由环境变量 GAUSSDB_RO_MCP_TEST_DSN 提供（key=value 形式）。
@@ -67,5 +69,86 @@ func TestEnforceReadOnlyBlocksWrites(t *testing.T) {
 	var ro string
 	if err := conn.QueryRow(ctx, "SHOW transaction_read_only").Scan(&ro); err != nil || ro != "on" {
 		t.Fatalf("transaction_read_only=%q err=%v，应为 on", ro, err)
+	}
+}
+
+// TestEnforceReadOnlyRecoversFromLingeringTransaction 模拟 55P02 的真实触发场景：
+// 服务端复用会话交付时残留未结束事务（GaussDB 禁止在事务中修改
+// default_transaction_read_only），enforceReadOnly 应 ROLLBACK 清理后回退 SET 成功。
+// 前提：测试库 default_transaction_read_only 为默认值 off。
+func TestEnforceReadOnlyRecoversFromLingeringTransaction(t *testing.T) {
+	dsn := testDSN(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn, err := gaussdbgo.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("连接失败: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	if _, err := conn.Exec(ctx, "BEGIN"); err != nil {
+		t.Fatalf("制造残留事务失败: %v", err)
+	}
+	if conn.GaussdbConn().TxStatus() != 'T' {
+		t.Fatalf("期望会话处于事务中（TxStatus=T），实际 %q", conn.GaussdbConn().TxStatus())
+	}
+
+	if err := enforceReadOnly(ctx, conn, 5*time.Second); err != nil {
+		t.Fatalf("残留事务应被清理并通过只读校验: %v", err)
+	}
+	if conn.GaussdbConn().TxStatus() != 'I' {
+		t.Fatalf("期望残留事务被 ROLLBACK（TxStatus=I），实际 %q", conn.GaussdbConn().TxStatus())
+	}
+
+	var ro string
+	if err := conn.QueryRow(ctx, "SHOW transaction_read_only").Scan(&ro); err != nil || !strings.EqualFold(ro, "on") {
+		t.Fatalf("transaction_read_only=%q err=%v，应为 on", ro, err)
+	}
+}
+
+// TestManagerPoolEnforcesReadOnly 覆盖连接池全链路（NewManager → AfterConnect）：
+// 池上 SELECT 正常返回，写操作被服务端只读会话拒绝。
+func TestManagerPoolEnforcesReadOnly(t *testing.T) {
+	dsn := testDSN(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cfg := &config.Config{
+		Server: config.Server{
+			MaxRowsCap:     10000,
+			ConnectTimeout: config.Duration(10 * time.Second),
+		},
+		Instances: []*config.Instance{{
+			Name:             "test",
+			DSN:              dsn,
+			PoolMaxConns:     2,
+			StatementTimeout: config.Duration(5 * time.Second),
+		}},
+	}
+	mgr, err := NewManager(ctx, cfg)
+	if err != nil {
+		t.Fatalf("创建 Manager 失败: %v", err)
+	}
+	defer mgr.Close()
+
+	inst, err := mgr.Resolve("test")
+	if err != nil {
+		t.Fatalf("解析实例失败: %v", err)
+	}
+
+	res, err := inst.Select(ctx, "SELECT 1 AS one", 10)
+	if err != nil {
+		t.Fatalf("池内 SELECT 失败: %v", err)
+	}
+	if res.RowCount != 1 {
+		t.Fatalf("期望返回 1 行，实际 %d 行", res.RowCount)
+	}
+
+	// 写操作应被服务端只读会话兜底拒绝（TEMP 表亦不允许）。
+	if _, err := inst.pool.Exec(ctx, "CREATE TEMP TABLE __ro_pool_t (i int)"); err == nil {
+		t.Error("池上写语句未被拒绝")
+	} else if !strings.Contains(err.Error(), "read-only") {
+		t.Logf("池上写语句被拒绝，原因: %v", err)
 	}
 }
