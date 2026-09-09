@@ -27,6 +27,17 @@
 
 所有工具均接受可选 `instance` 参数以选择数据源，缺省使用 `default_instance`。
 
+## 安装
+
+从 [Releases](https://github.com/gxc/gaussdb-ro-mcp/releases) 下载对应架构的二进制，
+用 `install` 安装到 `/usr/local/bin`（其他架构或内网环境可自行构建，见下节）：
+
+```bash
+curl -LO https://github.com/gxc/gaussdb-ro-mcp/releases/download/v0.1.1/gaussdb-ro-mcp-v0.1.1-linux-amd64
+sudo install -Dm 755 gaussdb-ro-mcp-v0.1.1-linux-amd64 /usr/local/bin/gaussdb-ro-mcp
+gaussdb-ro-mcp --version   # v0.1.1
+```
+
 ## 构建
 
 要求 Go 1.21+。驱动源码已内置于 `third_party/gaussdb-go`（通过 `replace` 指令引用），
@@ -35,7 +46,8 @@
 
 ```bash
 go build -o gaussdb-ro-mcp ./cmd/gaussdb-ro-mcp
-./gaussdb-ro-mcp --version
+sudo install -Dm 755 gaussdb-ro-mcp /usr/local/bin/gaussdb-ro-mcp
+gaussdb-ro-mcp --version
 ```
 
 ## 配置
@@ -74,7 +86,7 @@ default_instance: prod
 {
   "mcpServers": {
     "gaussdb-readonly": {
-      "command": "/opt/gaussdb-ro-mcp/gaussdb-ro-mcp",
+      "command": "/usr/local/bin/gaussdb-ro-mcp",
       "args": ["-config", "/opt/gaussdb-ro-mcp/gaussdb-ro-mcp.yaml"]
     }
   }
@@ -82,7 +94,7 @@ default_instance: prod
 ```
 
 ```bash
-claude mcp add gaussdb-readonly -- /opt/gaussdb-ro-mcp/gaussdb-ro-mcp -config /opt/gaussdb-ro-mcp/gaussdb-ro-mcp.yaml
+claude mcp add gaussdb-readonly -- /usr/local/bin/gaussdb-ro-mcp -config /opt/gaussdb-ro-mcp/gaussdb-ro-mcp.yaml
 ```
 
 ### OpenCode
@@ -95,7 +107,7 @@ claude mcp add gaussdb-readonly -- /opt/gaussdb-ro-mcp/gaussdb-ro-mcp -config /o
   "mcp": {
     "gaussdb-readonly": {
       "type": "local",
-      "command": ["/opt/gaussdb-ro-mcp/gaussdb-ro-mcp", "-config", "/opt/gaussdb-ro-mcp/gaussdb-ro-mcp.yaml"]
+      "command": ["/usr/local/bin/gaussdb-ro-mcp", "-config", "/opt/gaussdb-ro-mcp/gaussdb-ro-mcp.yaml"]
     }
   }
 }
