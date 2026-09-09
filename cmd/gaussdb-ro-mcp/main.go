@@ -28,40 +28,44 @@ func main() {
 	showVersion := flag.Bool("version", false, "打印版本号后退出")
 	flag.Parse()
 
-	if *showVersion {
-		fmt.Println(version)
-		return
-	}
-	if *configPath == "" {
-		*configPath = "gaussdb-ro-mcp.yaml"
-	}
-
-	// 所有日志走 stderr：stdout 是 MCP stdio 协议通道。
 	logger := log.New(os.Stderr, "[gaussdb-ro-mcp] ", log.LstdFlags)
+	if err := start(*configPath, *showVersion, version, logger); err != nil {
+		logger.Fatalf("gaussdb-ro-mcp 退出: %v", err)
+	}
+}
 
-	cfg, err := config.Load(*configPath)
+// start 执行完整启动流程；返回错误而非直接退出，便于测试。
+func start(configPath string, showVersion bool, ver string, logger *log.Logger) error {
+	if showVersion {
+		fmt.Println(ver)
+		return nil
+	}
+	if configPath == "" {
+		configPath = "gaussdb-ro-mcp.yaml"
+	}
+
+	cfg, err := config.Load(configPath)
 	if err != nil {
-		logger.Fatalf("配置加载失败: %v", err)
+		return fmt.Errorf("配置加载失败: %w", err)
 	}
 	logger.Printf("已加载配置 %s：%d 个数据源（默认实例: %s），语句超时 %s，max_rows %d",
-		*configPath, len(cfg.Instances), cfg.DefaultInstance,
+		configPath, len(cfg.Instances), cfg.DefaultInstance,
 		time.Duration(cfg.Server.StatementTimeout), cfg.Server.MaxRows)
 
+	// 优雅退出：SIGINT/SIGTERM 触发 server.Run 返回。
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	mgr, err := db.NewManager(ctx, cfg)
 	if err != nil {
-		logger.Fatalf("初始化数据源失败: %v", err)
+		return fmt.Errorf("初始化数据源失败: %w", err)
 	}
 	defer mgr.Close()
 	logger.Printf("数据源就绪: %s（默认: %s）；会话已强制 READ ONLY", mgr.InstanceNames(), mgr.DefaultInstanceName())
 
-	server := mcp.NewServer(&mcp.Implementation{Name: cfg.Server.Name, Version: version}, nil)
+	server := mcp.NewServer(&mcp.Implementation{Name: cfg.Server.Name, Version: ver}, nil)
 	tools.Register(server, mgr)
 
 	logger.Printf("MCP 服务器启动（stdio 传输），等待客户端...")
-	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {
-		logger.Fatalf("服务器退出: %v", err)
-	}
+	return server.Run(ctx, &mcp.StdioTransport{})
 }
