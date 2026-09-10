@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"flag"
 	"io"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -126,6 +128,10 @@ func TestStartServesUntilEOF(t *testing.T) {
 // TestMainGracefulShutdownOnSignal 经 main() 入口完整执行一次：运行中向自身发送
 // SIGINT，验证信号触发的 context.Canceled 被识别为正常关闭（回归 issue #5，
 // 不走 Fatalf/os.Exit(1)）。注意：main 会重复定义 flag，整个测试进程只调用一次。
+//
+// 就绪门控：捕获 os.Stderr 并等待 “MCP 服务器启动” 日志出现后再发信号——
+// 固定延时会在慢环境上抢在 start() 安装 NotifyContext 之前送达 SIGINT，
+// 默认终止行为将杀死整个测试二进制（回归测试自身的不稳定）。
 func TestMainGracefulShutdownOnSignal(t *testing.T) {
 	f := dbtest.Start(t)
 
@@ -138,6 +144,12 @@ func TestMainGracefulShutdownOnSignal(t *testing.T) {
 	oldArgs := os.Args
 	os.Args = []string{"gaussdb-ro-mcp", "-config", cfgPath}
 	defer func() { os.Args = oldArgs }()
+
+	// 兜底：注册一个信号缓冲通道，确保在 NotifyContext 安装前信号也不会
+	// 触发默认终止行为（多个 Notify 目标都会收到同一信号副本）。
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT)
+	defer signal.Stop(sigCh)
 
 	// stdin 用保持打开的管道（不发送数据），让 server.Run 阻塞直到信号到达。
 	r, w, err := os.Pipe()
@@ -152,9 +164,36 @@ func TestMainGracefulShutdownOnSignal(t *testing.T) {
 		w.Close()
 	}()
 
+	// 捕获 stderr：logger 在 main() 内创建，写入此刻的 os.Stderr（即本管道）。
+	sr, sw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = sw
+	defer func() {
+		os.Stderr = oldStderr
+		sr.Close()
+		sw.Close()
+	}()
+
+	ready := make(chan struct{})
 	go func() {
-		time.Sleep(500 * time.Millisecond)
-		// NotifyContext 已接管 SIGINT，默认终止行为被屏蔽，仅取消 ctx。
+		sc := bufio.NewScanner(sr)
+		for sc.Scan() {
+			if strings.Contains(sc.Text(), "MCP 服务器启动") {
+				close(ready)
+				return
+			}
+		}
+	}()
+
+	go func() {
+		select {
+		case <-ready:
+		case <-time.After(30 * time.Second): // 兜底：日志未出现也要发信号结束 main
+		}
+		// start() 已安装 NotifyContext（就绪日志在其之后输出），SIGINT 仅取消 ctx。
 		_ = syscall.Kill(os.Getpid(), syscall.SIGINT)
 	}()
 
