@@ -226,9 +226,10 @@ func tokenize(sql string) ([]string, error) {
 			toks = append(toks, "0")
 
 		case c == '"': // 引号标识符，"" 为转义；加前缀使其不参与关键字匹配
-			if escapePrefixAt(s, i) {
+			if uEscapePrefixAt(s, i) {
 				// U&"…" 的 Unicode 转义解码超出词法职责，且可用于伪造标识符
 				// 绕过黑名单（如 U&"set_\0063onfig" → set_config），保守拒绝。
+				// 注意 E 前缀对双引号无语义（仅 U& 是标识符转义前缀），不参与判定。
 				return nil, fmt.Errorf(`SQL 含 U&"…" Unicode 转义标识符，只读模式拒绝执行`)
 			}
 			i++
@@ -337,7 +338,8 @@ func tokenize(sql string) ([]string, error) {
 	return toks, nil
 }
 
-// escapePrefixAt 判断 s[i] 处的引号是否紧邻 E / U& 前缀（E”、U&” 转义字符串语法）。
+// escapePrefixAt 判断 s[i] 处的单引号是否紧邻 E / U& 前缀（E'…'、U&'…' 转义
+// 字符串语法）。
 // 前缀必须与引号逐字符相邻：列名/别名等标识符（如 "SELECT e, '\' FROM t" 中的 e）
 // 与引号之间隔着标点或空白时不得启用转义语义，否则 guard 与服务端对字符串边界的
 // 认定会错位，可被用于把危险函数调用藏进 guard 认定的"字符串"里。
@@ -349,18 +351,24 @@ func escapePrefixAt(s string, i int) bool {
 	case 'e', 'E':
 		return i-1 == 0 || !isIdentChar(s[i-2])
 	case '&':
-		if i < 2 {
-			return false
-		}
-		switch s[i-2] {
-		case 'u', 'U':
-			return i-2 == 0 || !isIdentChar(s[i-3])
-		}
+		return uEscapePrefixAt(s, i)
 	}
 	return false
 }
 
-// isIdentStart 判断标识符起始字符。
+// uEscapePrefixAt 判断 s[i] 处的引号是否紧邻 U& 前缀（U&'…' / U&"…" 转义语法）。
+// 仅 U& 是字符串/标识符的 Unicode 转义前缀；E 对双引号标识符无语义。
+func uEscapePrefixAt(s string, i int) bool {
+	if i < 2 {
+		return false
+	}
+	switch s[i-2] {
+	case 'u', 'U':
+		return i-2 == 0 || !isIdentChar(s[i-3])
+	}
+	return false
+}
+
 // buildFullName 从 toks[j] 向前回溯，把 "." 与标识符/引号标识符连接成限定全名
 // （如 pg_catalog.dblink）。遇到其他 token（关键字、括号等）即停止。
 func buildFullName(toks []string, j int, name string) string {
@@ -377,6 +385,7 @@ func buildFullName(toks []string, j int, name string) string {
 	return full
 }
 
+// isIdentStart 判断标识符起始字符。
 func isIdentStart(c byte) bool {
 	return c == '_' || c == '$' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c >= 0x80
 }
