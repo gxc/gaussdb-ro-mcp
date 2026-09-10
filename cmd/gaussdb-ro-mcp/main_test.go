@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"flag"
 	"io"
 	"log"
 	"os"
@@ -153,4 +155,24 @@ func TestMainGracefulShutdownOnSignal(t *testing.T) {
 	}()
 
 	main() // 信号触发优雅退出：不应 os.Exit(1)
+}
+
+// TestPrintUsage 验证帮助信息包含版本、参数与反馈/最新版本地址。
+func TestPrintUsage(t *testing.T) {
+	flagSet := flag.NewFlagSet("gaussdb-ro-mcp", flag.ContinueOnError)
+	registerFlags(flagSet)
+	var buf bytes.Buffer
+	printUsage(&buf, "v9.9-test", flagSet)
+	out := buf.String()
+	for _, want := range []string{
+		"v9.9-test",
+		"-config",
+		"-version",
+		"https://github.com/gxc/gaussdb-ro-mcp/issues",
+		"https://github.com/gxc/gaussdb-ro-mcp/releases/latest",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("帮助信息缺少 %q:\n%s", want, out)
+		}
+	}
 }

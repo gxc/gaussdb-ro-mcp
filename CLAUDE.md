@@ -59,6 +59,14 @@ third_party/gaussdb-go       GaussDB 官方 Go 驱动源码，经 go.mod replace
 
 调用链：MCP 工具 → `Manager.Resolve(instance)`（空名取 `default_instance`）→ `Instance` 的元数据方法或 `Select`。`execute_select` 的 maxRows 缺省取实例配置，硬顶为服务级 `max_rows_cap`。
 
+## 发布流程
+
+1. 构建产物：`CGO_ENABLED=0 GOOS=linux GOARCH=amd64|arm64 go build -trimpath -ldflags "-s -w -X main.version=vX.Y.Z" -o dist/gaussdb-ro-mcp-vX.Y.Z-linux-<arch> ./cmd/gaussdb-ro-mcp`，重新生成 `dist/SHA256SUMS.txt` 并 `sha256sum -c` 校验；本地 `dist/` 替换为当版产物（旧版产物保留在对应 Release 页面）。
+2. 打 annotated tag 并推送：`git tag -a vX.Y.Z && git push origin vX.Y.Z`。
+3. `gh release create vX.Y.Z dist/... --title "gaussdb-ro-mcp vX.Y.Z" --notes-file -`；说明沿用既有格式，安装命令用 `sudo install -Dm 755` 装到 `/usr/local/bin`。
+4. **产物与文案约定**：架构名只用 `linux-amd64` / `linux-arm64`，ARM64 **不要**加"（鲲鹏/飞腾等）"之类的举例；含安全修复时在说明头部标注"建议所有用户尽快升级"。
+5. Release 说明末尾附 compare 链接（`/compare/v上一版...vX.Y.Z`）。
+
 ## 关键约束
 
 - **stdout 是 MCP 协议通道**，所有日志必须走 stderr（现有代码用 `log.New(os.Stderr, ...)`）。

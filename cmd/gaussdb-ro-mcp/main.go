@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -25,12 +26,12 @@ import (
 var version = "dev" // 由构建时 -ldflags 注入
 
 func main() {
-	configPath := flag.String("config", os.Getenv("GAUSSDB_RO_MCP_CONFIG"), "配置文件路径（默认 ./gaussdb-ro-mcp.yaml，或环境变量 GAUSSDB_RO_MCP_CONFIG）")
-	showVersion := flag.Bool("version", false, "打印版本号后退出")
+	fs := registerFlags(flag.CommandLine)
+	flag.Usage = func() { printUsage(flag.CommandLine.Output(), version, flag.CommandLine) }
 	flag.Parse()
 
 	logger := log.New(os.Stderr, "[gaussdb-ro-mcp] ", log.LstdFlags)
-	if err := start(*configPath, *showVersion, version, logger); err != nil {
+	if err := start(*fs.configPath, *fs.showVersion, version, logger); err != nil {
 		if errors.Is(err, context.Canceled) {
 			// SIGINT/SIGTERM 触发的正常关闭：以退出码 0 结束，而非记为崩溃。
 			logger.Printf("收到退出信号，已正常关闭")
@@ -38,6 +39,29 @@ func main() {
 		}
 		logger.Fatalf("gaussdb-ro-mcp 退出: %v", err)
 	}
+}
+
+// progFlags 是命令行参数集合。
+type progFlags struct {
+	configPath  *string
+	showVersion *bool
+}
+
+// registerFlags 向 FlagSet 注册命令行参数（main 与测试共用，避免描述漂移）。
+func registerFlags(fs *flag.FlagSet) *progFlags {
+	return &progFlags{
+		configPath:  fs.String("config", os.Getenv("GAUSSDB_RO_MCP_CONFIG"), "配置文件路径（默认 ./gaussdb-ro-mcp.yaml，或环境变量 GAUSSDB_RO_MCP_CONFIG）"),
+		showVersion: fs.Bool("version", false, "打印版本号后退出"),
+	}
+}
+
+// printUsage 输出帮助信息：用法、参数，以及问题反馈与最新版本的获取地址。
+func printUsage(w io.Writer, ver string, fs *flag.FlagSet) {
+	fs.SetOutput(w)
+	fmt.Fprintf(w, "gaussdb-ro-mcp %s — 面向 Coding Agent 的 GaussDB 只读 MCP 服务器（stdio 传输）\n\n", ver)
+	fmt.Fprintf(w, "用法：\n  gaussdb-ro-mcp [flags]\n\n参数：\n")
+	fs.PrintDefaults()
+	fmt.Fprintf(w, "\n问题反馈：    https://github.com/gxc/gaussdb-ro-mcp/issues\n获取最新版本：https://github.com/gxc/gaussdb-ro-mcp/releases/latest\n")
 }
 
 // start 执行完整启动流程；返回错误而非直接退出，便于测试。

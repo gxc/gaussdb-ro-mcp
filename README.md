@@ -163,3 +163,11 @@ internal/tools/         MCP 工具注册与实现
 scripts/devseed/        集成测试数据灌入工具（开发用）
 third_party/gaussdb-go/ GaussDB 官方 Go 驱动源码（go.mod replace 引用）
 ```
+
+## 反馈与贡献
+
+欢迎提交 Issue 和 Pull Request：
+
+- 问题反馈 / 功能建议：<https://github.com/gxc/gaussdb-ro-mcp/issues>
+- 获取最新版本：<https://github.com/gxc/gaussdb-ro-mcp/releases/latest>
+- 提交 PR 前，请确保 `go vet ./...` 与 `go test ./...` 通过；涉及安全防护逻辑（SQL 静态校验 / 只读强制）的改动请附带回归测试
