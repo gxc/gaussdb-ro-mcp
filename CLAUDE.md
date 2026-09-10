@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 面向 Coding Agent（Claude Code、OpenCode 等）的 GaussDB 只读 MCP 服务器，Go 语言实现，stdio 传输。代码注释、错误信息、文档均使用中文——新增代码保持一致。
 
+**重点支持 GaussDB（集中式与分布式）**；openGauss 仅为顺带兼容与本地测试便利。遇到不确定的行为差异，优先查阅华为 GaussDB 官方文档而非按 PostgreSQL 惯例推断；openGauss/本地 mock 测试通过不能作为 GaussDB 兼容的充分证据（集成测试仍由真实实例门控）。
+
 ## 常用命令
 
 ```bash
