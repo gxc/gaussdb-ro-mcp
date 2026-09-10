@@ -89,8 +89,8 @@ func handleTestConnection(ctx context.Context, m *db.Manager, in struct{ instanc
 	}
 	latency := time.Since(start).Milliseconds()
 	ro, roErr := inst.ReadOnlyStatus(ctx)
-	// ok 要求会话确实为只读，与 enforceReadOnly 的判定一致：
-	// 查询成功但返回 off 时同样是故障形态（如启动参数被代理剥离）。
+	// ok 要求会话确实为只读，与只读事务机制的预期一致：
+	// 查询成功但返回 off 时同样是故障形态（如只读事务未被服务端接受）。
 	ok := roErr == nil && strings.EqualFold(ro, "on")
 	out := map[string]any{
 		"ok":                    ok,
