@@ -214,12 +214,17 @@ func handleExecuteSelect(ctx context.Context, m *db.Manager, name, sql string, m
 	if err != nil {
 		return nil, nil, fmt.Errorf("查询执行失败: %w", err)
 	}
-	return nil, map[string]any{
+	out := map[string]any{
 		"instance":    inst.Name,
 		"columns":     res.Columns,
 		"rows":        res.Rows,
 		"row_count":   res.RowCount,
 		"truncated":   res.Truncated,
 		"duration_ms": res.DurationMS,
-	}, nil
+	}
+	if res.Warning != "" {
+		// 结果完整、仅收尾（提交）失败：附警告而非丢弃已取回的数据。
+		out["warning"] = res.Warning
+	}
+	return nil, out, nil
 }

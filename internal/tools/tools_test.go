@@ -370,23 +370,22 @@ func TestHandleExecuteSelect(t *testing.T) {
 	})
 }
 
-// TestHandleTestConnectionReadOnlyOff 回归 issue #9：只读状态为 off 时 ok 必须为 false。
+// TestHandleTestConnectionReadOnlyOff 回归 issue #9：只读未生效时不可装作正常。
+// 事务级强制下，任何 SHOW transaction_read_only 非 on 的实例会在 queryReadOnly
+// 的事务内校验处 fail-closed（拒绝执行查询），test_connection 如实报连接失败，
+// 而不是给出 ok=true 的假象。
 func TestHandleTestConnectionReadOnlyOff(t *testing.T) {
-	// SHOW 返回 off：模拟分布式实例仅支持事务级只读、会话默认可写的形态。
+	// SHOW 返回 off：模拟 SET LOCAL 被剥离/未生效的形态。
 	mgr := newMockManager(t, dbtest.WithShowValues("off"))
-	_, res, err := handleTestConnection(context.Background(), mgr, struct{ instanceArg }{})
-	if err != nil {
-		t.Fatalf("test_connection 不应报传输错误: %v", err)
+	_, _, err := handleTestConnection(context.Background(), mgr, struct{ instanceArg }{})
+	if err == nil || !strings.Contains(err.Error(), "只读事务校验失败") {
+		t.Fatalf("只读未生效时 test_connection 应报校验失败，实际: %v", err)
 	}
-	out := asMap(t, res)
-	if out["ok"] != false {
-		t.Errorf("transaction_read_only=off 时 ok 应为 false: %v", out)
-	}
-	if msg, _ := out["read_only_check_error"].(string); !strings.Contains(msg, "off") {
-		t.Errorf("应附显式错误说明: %v", out["read_only_check_error"])
+	if !strings.Contains(err.Error(), "off") {
+		t.Errorf("错误信息应包含实际只读状态: %v", err)
 	}
 
-	// ReadOnlyStatus 查询本身失败：同样 ok=false，错误说明取自查询错误。
+	// 只读校验查询本身失败：同样 fail-closed 报连接失败。
 	ctx := context.Background()
 	mgr2 := newMockManager(t, dbtest.WithQueryHook(func(q string) *dbtest.Result {
 		if strings.Contains(strings.ToUpper(q), "TRANSACTION_READ_ONLY") {
@@ -394,16 +393,9 @@ func TestHandleTestConnectionReadOnlyOff(t *testing.T) {
 		}
 		return nil
 	}))
-	_, res2, err2 := handleTestConnection(ctx, mgr2, struct{ instanceArg }{})
-	if err2 != nil {
-		t.Fatalf("test_connection 不应报传输错误: %v", err2)
-	}
-	out2 := asMap(t, res2)
-	if out2["ok"] != false {
-		t.Errorf("SHOW 失败时 ok 应为 false: %v", out2)
-	}
-	if msg, _ := out2["read_only_check_error"].(string); !strings.Contains(msg, "show 失败") {
-		t.Errorf("错误说明应取自查询错误: %v", out2["read_only_check_error"])
+	_, _, err2 := handleTestConnection(ctx, mgr2, struct{ instanceArg }{})
+	if err2 == nil || !strings.Contains(err2.Error(), "校验事务只读状态失败") {
+		t.Fatalf("SHOW 查询失败应报校验失败，实际: %v", err2)
 	}
 }
 
