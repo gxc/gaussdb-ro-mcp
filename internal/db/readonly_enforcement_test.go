@@ -152,3 +152,35 @@ func TestManagerPoolEnforcesReadOnly(t *testing.T) {
 		t.Logf("池上写语句被拒绝，原因: %v", err)
 	}
 }
+
+// TestEnforceReadOnlyRecoversFromAbortedTransaction 回归 issue #4 场景 a：
+// 中止的残留事务里任何 SET 都会报 25P02，enforceReadOnly 应先 ROLLBACK 清理
+// 再回退会话级 SET（statement_timeout 在只读校验完成后设置）。
+func TestEnforceReadOnlyRecoversFromAbortedTransaction(t *testing.T) {
+	dsn := testDSN(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn, err := gaussdbgo.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("连接失败: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	if _, err := conn.Exec(ctx, "BEGIN"); err != nil {
+		t.Fatalf("开启事务失败: %v", err)
+	}
+	if _, err := conn.Exec(ctx, "SELECT 1/0"); err == nil {
+		t.Fatal("除零应失败从而使事务进入中止状态")
+	}
+	if got := conn.GaussdbConn().TxStatus(); got != 'E' {
+		t.Fatalf("期望会话处于中止事务（TxStatus=E），实际 %q", got)
+	}
+
+	if err := enforceReadOnly(ctx, conn, 5*time.Second); err != nil {
+		t.Fatalf("中止事务应被清理并通过只读校验: %v", err)
+	}
+	if got := conn.GaussdbConn().TxStatus(); got != 'I' {
+		t.Fatalf("期望中止事务被 ROLLBACK（TxStatus=I），实际 %q", got)
+	}
+}

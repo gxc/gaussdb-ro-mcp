@@ -70,7 +70,11 @@ type Option func(*Server)
 // WithShowValues 让 SHOW transaction_read_only 依序返回给定值（超出后重复最后一个）。
 // 默认仅 "on"。
 func WithShowValues(vals ...string) Option {
-	return func(s *Server) { s.showValues = vals }
+	return func(s *Server) {
+		if len(vals) > 0 { // 防御空/越界入参，避免取值时索引越界
+			s.showValues = vals
+		}
+	}
 }
 
 // WithPartitionSupport 模拟 openGauss/GaussDB（pg_class 含 parttype 列）。
@@ -168,6 +172,7 @@ type connState struct {
 	lastQuery  string
 	lastParams int
 	prepared   map[string]string // 预备语句名 → 查询文本（语句缓存命中时不重发 Parse）
+	pending    map[string]bool   // 刚 Parse 完、等待 Bind 的语句：Bind 时复用 Parse 时计算的结果
 	res        *Result
 	errMode    bool
 }
@@ -194,7 +199,7 @@ func (s *Server) handle(conn net.Conn) {
 		return
 	}
 
-	st := &connState{prepared: map[string]string{}}
+	st := &connState{prepared: map[string]string{}, pending: map[string]bool{}}
 	pkt := make([]byte, 0, 4096)
 	tmp := make([]byte, 4096)
 	for {
@@ -277,6 +282,7 @@ func (s *Server) response(typ byte, payload []byte, st *connState) []byte {
 		if len(parts) >= 2 {
 			st.lastQuery = string(parts[1])
 			st.prepared[name] = st.lastQuery
+			st.pending[name] = true
 		}
 		st.lastParams = countPlaceholders(st.lastQuery)
 		st.res = s.computeResult(st.lastQuery, st)
@@ -286,9 +292,14 @@ func (s *Server) response(typ byte, payload []byte, st *connState) []byte {
 		}
 		return msg('1', nil) // ParseComplete
 
-	case 'B': // Bind：portal\0 stmt\0 …——语句缓存命中时按名字重新计算结果集
+	case 'B': // Bind：portal\0 stmt\0 …
+		// 语句缓存命中（本连接上未见对应 Parse）时按名字重算结果集，
+		// 保证 SHOW 序列等按逻辑执行次数推进；本次 Parse 对应的 Bind 复用原结果。
 		if parts := bytes.SplitN(payload, []byte{0}, 3); len(parts) >= 2 {
-			if q, ok := st.prepared[string(parts[1])]; ok {
+			name := string(parts[1])
+			if st.pending[name] {
+				delete(st.pending, name)
+			} else if q, ok := st.prepared[name]; ok {
 				st.lastQuery = q
 				st.res = s.computeResult(q, st)
 			}

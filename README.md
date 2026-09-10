@@ -40,7 +40,7 @@ gaussdb-ro-mcp --version   # v0.1.1
 
 ## 构建
 
-要求 Go 1.21+。驱动源码已内置于 `third_party/gaussdb-go`（通过 `replace` 指令引用），
+要求 Go 1.26+（与 go.mod 一致）。驱动源码已内置于 `third_party/gaussdb-go`（通过 `replace` 指令引用），
 正常联网环境下 `go build` 会自动解析其余依赖；纯内网环境请先在有网环境执行 `go mod vendor`
 后携带 `vendor/` 目录，用 `go build -mod=vendor` 构建。
 

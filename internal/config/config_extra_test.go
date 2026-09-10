@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -35,8 +36,8 @@ func TestBuildDSNWithOptions(t *testing.T) {
 		Options:  []string{"application_name=mcp"},
 	}
 	got = kvInst.BuildDSN()
-	if !strings.HasSuffix(got, "application_name=mcp") {
-		t.Errorf("kv DSN 应追加 options: %s", got)
+	if !strings.Contains(got, "application_name=mcp") || !strings.HasPrefix(got, "gaussdb://") {
+		t.Errorf("kv 实例应生成含 options 的 URL DSN: %s", got)
 	}
 }
 
@@ -62,12 +63,6 @@ func TestJoinOptionsDirect(t *testing.T) {
 	if got := joinOptions2("a=1", []string{"b=2"}); got != "a=1 b=2" {
 		t.Errorf("joinOptions2 = %q", got)
 	}
-	if got := joinOptions([]string{"b=2"}); got != " b=2" {
-		t.Errorf("joinOptions = %q", got)
-	}
-	if got := joinOptions(nil); got != "" {
-		t.Errorf("空 options 应返回空串: %q", got)
-	}
 }
 
 // TestDurationUnmarshalNumeric 覆盖纯数字（秒）形式的时长解析。
@@ -87,7 +82,88 @@ func TestPortDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(cfg.Instances[0].BuildDSN(), "port=5432") {
+	if !strings.Contains(cfg.Instances[0].BuildDSN(), ":5432/") {
 		t.Errorf("端口应缺省为 5432: %s", cfg.Instances[0].BuildDSN())
+	}
+}
+
+// TestLoadEmptyInstanceItem 回归 issue #6：空列表项应报错而非 panic。
+func TestLoadEmptyInstanceItem(t *testing.T) {
+	_, err := Load(writeTemp(t, "instances:\n  -\n  - name: ok\n    host: h\n    database: d\n"))
+	if err == nil || !strings.Contains(err.Error(), "空项") {
+		t.Fatalf("空列表项应报错而非 panic: %v", err)
+	}
+}
+
+// TestLoadRejectsUnknownKeys 回归 issue #12：拼错的键应报错而非静默用默认值。
+func TestLoadRejectsUnknownKeys(t *testing.T) {
+	content := `
+server:
+  max_row: 5000
+instances:
+  - name: a
+    host: h
+    database: d
+`
+	_, err := Load(writeTemp(t, content))
+	if err == nil {
+		t.Fatal("未知键应报错")
+	}
+	if !strings.Contains(err.Error(), "max_row") {
+		t.Errorf("错误信息应指出未知键: %v", err)
+	}
+}
+
+// TestBuildDSNPasswordEscaping 回归 issue #10：密码含空格/@ 时 DSN 不应损坏。
+func TestBuildDSNPasswordEscaping(t *testing.T) {
+	inst := Instance{
+		Host:     "h",
+		Port:     5432,
+		Database: "db",
+		User:     "u",
+		Password: "pass word@2026",
+	}
+	got := inst.BuildDSN()
+	if !strings.Contains(got, "pass%20word%402026") {
+		t.Errorf("密码应被 URL 转义: %s", got)
+	}
+	// 生成的 DSN 应能被 URL 解析还原出原密码。
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("DSN 应可解析: %v", err)
+	}
+	if pw, _ := u.User.Password(); pw != "pass word@2026" {
+		t.Errorf("解析出的密码应还原: %q", pw)
+	}
+}
+
+// TestEnsureSSLModePasswordSubstring 回归 issue #10：密码含 "sslmode=" 子串时
+// 不应抑制默认 sslmode 追加。
+func TestEnsureSSLModePasswordSubstring(t *testing.T) {
+	inst := Instance{
+		Host:     "h",
+		Port:     5432,
+		Database: "db",
+		User:     "u",
+		Password: "xK3sslmode=9q",
+	}
+	got := inst.BuildDSN()
+	if !strings.Contains(got, "sslmode=disable") {
+		t.Errorf("应追加默认 sslmode=disable: %s", got)
+	}
+}
+
+// TestDurationUnmarshalRejectsBadNumbers 回归 issue #16：NaN/负数/溢出时长应报错。
+func TestDurationUnmarshalRejectsBadNumbers(t *testing.T) {
+	for _, in := range []string{"nan", "inf", "-5", "1e18"} {
+		var d Duration
+		if err := yaml.Unmarshal([]byte(in), &d); err == nil {
+			t.Errorf("%q 应报非法时长", in)
+		}
+	}
+	// 合法边界：恰好 MaxInt64 纳秒以内。
+	var d Duration
+	if err := yaml.Unmarshal([]byte("9223372036"), &d); err != nil { // ≈292 年，秒数 ×1e9 仍在 int64 内
+		t.Errorf("大但合法的秒数不应报错: %v", err)
 	}
 }

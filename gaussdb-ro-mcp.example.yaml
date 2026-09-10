@@ -15,7 +15,10 @@ server:
   connect_timeout: 10s
   # 危险函数黑名单（前缀匹配）。非空时覆盖内置默认值；
   # 内置默认包含：set_config、setval、nextval、dblink*、lo_import*、
-  # pg_read_file*、pg_terminate_backend、pg_advisory_* 等。
+  # pg_read_file*、pg_terminate_backend、pg_advisory*、pg_try_advisory* 等。
+  # 匹配规则：以 * 结尾按前缀匹配；否则按函数尾段精确匹配；
+  # 含 schema 限定（如 "pg_catalog.dblink"）按全名匹配。
+  # 注意：非空时整体替换默认黑名单，追加条目请先复制默认清单。
   # blocked_functions: ["dblink*", "gs_backup*"]
 
 instances:

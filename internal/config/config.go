@@ -3,7 +3,10 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
+	"math"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -20,12 +23,16 @@ type Duration time.Duration
 func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 	s := strings.TrimSpace(node.Value)
 	if secs, err := strconv.ParseFloat(s, 64); err == nil {
+		// 拒绝 NaN/±Inf/负数/溢出：这些值会以平台相关的方式被静默重置或损坏配置。
+		if math.IsNaN(secs) || math.IsInf(secs, 0) || secs < 0 || secs*float64(time.Second) > math.MaxInt64 {
+			return fmt.Errorf("非法时长 %q", node.Value)
+		}
 		*d = Duration(time.Duration(secs * float64(time.Second)))
 		return nil
 	}
 	v, err := time.ParseDuration(s)
 	if err != nil {
-		return fmt.Errorf("invalid duration %q: %w", s, err)
+		return fmt.Errorf("非法时长 %q: %w", node.Value, err)
 	}
 	*d = Duration(v)
 	return nil
@@ -43,7 +50,12 @@ type Server struct {
 	StatementTimeout Duration `yaml:"statement_timeout"`
 	// ConnectTimeout 是建立 TCP 连接的超时。
 	ConnectTimeout Duration `yaml:"connect_timeout"`
-	// BlockedFunctions 覆盖默认的危险函数黑名单（前缀匹配，小写，如 "dblink*"）。
+	// BlockedFunctions 覆盖默认的危险函数黑名单（小写）。
+	// 匹配规则：条目以 * 结尾时对函数名做前缀匹配（如 "dblink*"）；
+	// 无 * 时按函数尾段精确匹配（如 "set_config"）；含 schema 限定的条目
+	// （如 "pg_catalog.dblink"）按全名匹配。
+	// 注意：非空时【整体替换】默认黑名单（见 guard.DefaultBlockedFunctions），
+	// 追加条目请先复制默认清单。
 	BlockedFunctions []string `yaml:"blocked_functions"`
 }
 
@@ -106,6 +118,9 @@ func (c *Config) SetDefaults() {
 		c.Server.ConnectTimeout = Duration(10 * time.Second)
 	}
 	for _, inst := range c.Instances {
+		if inst == nil {
+			continue // 空列表项由 validate 报错
+		}
 		if inst.SSLMode == "" {
 			inst.SSLMode = "disable"
 		}
@@ -122,8 +137,13 @@ func (c *Config) SetDefaults() {
 			inst.PoolMaxConns = 4
 		}
 	}
-	if c.DefaultInstance == "" && len(c.Instances) > 0 {
-		c.DefaultInstance = c.Instances[0].Name
+	if c.DefaultInstance == "" {
+		for _, inst := range c.Instances {
+			if inst != nil && inst.Name != "" {
+				c.DefaultInstance = inst.Name
+				break
+			}
+		}
 	}
 }
 
@@ -134,6 +154,9 @@ func (c *Config) validate() error {
 	}
 	seen := map[string]bool{}
 	for i, inst := range c.Instances {
+		if inst == nil {
+			return fmt.Errorf("instances[%d] 不能为空项", i)
+		}
 		if inst.Name == "" {
 			return fmt.Errorf("instances[%d].name 不能为空", i)
 		}
@@ -159,24 +182,38 @@ func (c *Config) validate() error {
 	return nil
 }
 
-// BuildDSN 返回实例的最终连接串。
+// BuildDSN 返回实例的最终连接串（URL 形式，密码等特殊字符自动转义）。
 func (inst *Instance) BuildDSN() string {
 	if inst.DSN != "" {
 		return appendOptions(ensureSSLMode(inst.DSN, inst.SSLMode), inst.Options)
 	}
-	parts := []string{
-		"host=" + inst.Host,
-		"port=" + strconv.Itoa(inst.Port),
-		"dbname=" + inst.Database,
+	host := inst.Host
+	if inst.Port > 0 {
+		host = net.JoinHostPort(inst.Host, strconv.Itoa(inst.Port))
 	}
+	u := url.URL{Scheme: "gaussdb", Host: host, Path: "/" + inst.Database}
 	if inst.User != "" {
-		parts = append(parts, "user="+inst.User)
+		if inst.Password != "" {
+			u.User = url.UserPassword(inst.User, inst.Password)
+		} else {
+			u.User = url.User(inst.User)
+		}
 	}
-	if inst.Password != "" {
-		parts = append(parts, "password="+inst.Password)
+	q := url.Values{}
+	sslmode := inst.SSLMode
+	if sslmode == "" {
+		sslmode = "disable" // 与 SetDefaults 的默认值一致，直接构造时同样生效
 	}
-	parts = append(parts, "sslmode="+inst.SSLMode)
-	return strings.Join(parts, " ") + joinOptions(inst.Options)
+	q.Set("sslmode", sslmode)
+	for _, o := range inst.Options {
+		if i := strings.IndexByte(o, '='); i > 0 {
+			q.Set(o[:i], o[i+1:])
+		}
+	}
+	if len(q) > 0 {
+		u.RawQuery = q.Encode()
+	}
+	return u.String()
 }
 
 // appendOptions 把 key=value 形式的附加参数合并进连接串：
@@ -205,29 +242,40 @@ func joinOptions2(dsn string, opts []string) string {
 }
 
 // ensureSSLMode 在连接串未指定 sslmode 时追加指定值（默认 disable）。
-// 同时支持 URL 形式与 key=value 形式。
+// URL 形式按查询参数解析判断；keyword=value 形式按空白分隔的字段判断，
+// 避免密码值中恰含 "sslmode=" 子串时误判为已设置。
 func ensureSSLMode(dsn, mode string) string {
 	if mode == "" {
 		mode = "disable"
 	}
-	if strings.Contains(dsn, "sslmode=") {
-		return dsn
-	}
 	if strings.Contains(dsn, "://") {
-		sep := "?"
-		if strings.Contains(dsn, "?") {
-			sep = "&"
+		u, err := url.Parse(dsn)
+		if err != nil {
+			return dsn // 无法解析，保守不动
 		}
-		return dsn + sep + "sslmode=" + mode
+		if u.Query().Has("sslmode") {
+			return dsn
+		}
+		q := u.Query()
+		q.Set("sslmode", mode)
+		u.RawQuery = q.Encode()
+		return u.String()
+	}
+	if hasParamKey(dsn, "sslmode") {
+		return dsn
 	}
 	return dsn + " sslmode=" + mode
 }
 
-func joinOptions(opts []string) string {
-	if len(opts) == 0 {
-		return ""
+// hasParamKey 判断 keyword=value 形式的连接串中是否已含指定键。
+// 键必须位于串首或空白之后，避免密码值中恰含目标子串的误伤。
+func hasParamKey(dsn, key string) bool {
+	for _, field := range strings.Fields(dsn) {
+		if strings.HasPrefix(field, key+"=") {
+			return true
+		}
 	}
-	return " " + strings.Join(opts, " ")
+	return false
 }
 
 // Load 从 path 读取并解析配置文件。
@@ -237,7 +285,11 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("读取配置文件失败: %w", err)
 	}
 	cfg := &Config{}
-	if err := yaml.Unmarshal(data, cfg); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	// 拒绝未知键：拼错的限制项（如 max_rows 写成 max_row）应大声报错，
+	// 而不是静默回退到默认值。
+	dec.KnownFields(true)
+	if err := dec.Decode(cfg); err != nil {
 		return nil, fmt.Errorf("解析配置文件失败: %w", err)
 	}
 	cfg.SetDefaults()

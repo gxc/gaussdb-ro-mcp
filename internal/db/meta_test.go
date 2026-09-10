@@ -4,9 +4,13 @@ import (
 	"context"
 	"database/sql/driver"
 	"fmt"
+	"math"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	gaussdbgo "github.com/HuaweiCloudDeveloper/gaussdb-go"
 
 	"gaussdb-ro-mcp/internal/config"
 	"gaussdb-ro-mcp/internal/dbtest"
@@ -19,16 +23,6 @@ func TestRelKindExpr(t *testing.T) {
 	}
 	if got := relKindExpr(true); !strings.Contains(got, "parttype = 'p'") {
 		t.Errorf("分区模式应使用 parttype 表达式: %s", got)
-	}
-}
-
-// TestQuoteIdent 验证标识符转义。
-func TestQuoteIdent(t *testing.T) {
-	if got := QuoteIdent(`us"ers`); got != `"us""ers"` {
-		t.Errorf("引号未转义: %s", got)
-	}
-	if got := QuoteIdent("users"); got != `"users"` {
-		t.Errorf("普通标识符错误: %s", got)
 	}
 }
 
@@ -404,5 +398,160 @@ func TestSelectAndQuery(t *testing.T) {
 	}
 	if _, err := badInst.Query(ctx, "SELECT 1"); err == nil {
 		t.Error("Query 查询错误应上抛")
+	}
+}
+
+// TestEnforceReadOnlyReSetsTimeoutAfterFallback 回归 issue #4：
+// 回退路径（ROLLBACK + 会话级 SET）之后必须重新设置 statement_timeout，
+// 否则打开事务里的事务作用域 SET 会被一并回滚，连接无服务端超时入池。
+func TestEnforceReadOnlyReSetsTimeoutAfterFallback(t *testing.T) {
+	var mu sync.Mutex
+	var order []string
+	var f *dbtest.Server
+	f = dbtest.Start(t, dbtest.WithShowValues("off", "on"),
+		dbtest.WithQueryHook(func(q string) *dbtest.Result {
+			mu.Lock()
+			order = append(order, q)
+			mu.Unlock()
+			return nil // 记录后仍走默认应答
+		}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := gaussdbgo.Connect(ctx, f.DSN())
+	if err != nil {
+		t.Fatalf("连接失败: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	if err := enforceReadOnly(ctx, conn, 3*time.Second); err != nil {
+		t.Fatalf("回退应成功: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	rollbackIdx, setTimeoutIdx := -1, -1
+	for i, q := range order {
+		if strings.HasPrefix(q, "ROLLBACK") && rollbackIdx == -1 {
+			rollbackIdx = i
+		}
+		if strings.HasPrefix(q, "SET statement_timeout") {
+			setTimeoutIdx = i
+		}
+	}
+	if rollbackIdx == -1 || setTimeoutIdx == -1 {
+		t.Fatalf("应先 ROLLBACK 再设 statement_timeout，实际顺序: %v", order)
+	}
+	if setTimeoutIdx < rollbackIdx {
+		t.Fatalf("statement_timeout 应在 ROLLBACK 之后设置: %v", order)
+	}
+}
+
+// TestSetStatementTimeoutClampSubMillisecond 回归 issue #13：亚毫秒时长钳制为 1ms。
+func TestSetStatementTimeoutClampSubMillisecond(t *testing.T) {
+	var mu sync.Mutex
+	var setTimeout string
+	f := dbtest.Start(t, dbtest.WithQueryHook(func(q string) *dbtest.Result {
+		if strings.HasPrefix(q, "SET statement_timeout") {
+			mu.Lock()
+			setTimeout = q
+			mu.Unlock()
+		}
+		return nil
+	}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := gaussdbgo.Connect(ctx, f.DSN())
+	if err != nil {
+		t.Fatalf("连接失败: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	if err := enforceReadOnly(ctx, conn, 100*time.Microsecond); err != nil {
+		t.Fatalf("enforceReadOnly 失败: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.HasSuffix(setTimeout, "= 1") {
+		t.Errorf("亚毫秒超时应钳制为 1ms，实际: %q", setTimeout)
+	}
+}
+
+// TestDedupColumnsAndDuplicateSelect 回归 issue #8：重复列名生成唯一键且数据不丢。
+func TestDedupColumnsAndDuplicateSelect(t *testing.T) {
+	if got := dedupColumns([]string{"id", "id", "id_2"}); fmt.Sprint(got) != "[id id_2 id_2_2]" {
+		t.Errorf("dedupColumns = %v", got)
+	}
+
+	inst, _ := newMockInstance(t, dbtest.WithQueryHook(func(q string) *dbtest.Result {
+		if !strings.Contains(q, "AS id") {
+			return nil // 其余查询走默认应答
+		}
+		return dbtest.Rows(
+			[]dbtest.Col{dbtest.Text("id", "first"), dbtest.Text("id", "second")},
+			[]string{"first", "second"},
+		)
+	}))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, err := inst.Select(ctx, "SELECT 1 AS id, 2 AS id", 10)
+	if err != nil {
+		t.Fatalf("Select 失败: %v", err)
+	}
+	if fmt.Sprint(res.Columns) != "[id id_2]" {
+		t.Errorf("列应去重: %v", res.Columns)
+	}
+	if len(res.Rows) != 1 || res.Rows[0]["id"] != "first" || res.Rows[0]["id_2"] != "second" {
+		t.Errorf("两列数据都应保留: %v", res.Rows[0])
+	}
+}
+
+// TestNormalizeFloatNonFinite 回归 issue #16：NaN/±Inf 转字符串避免 JSON 序列化失败。
+func TestNormalizeFloatNonFinite(t *testing.T) {
+	cases := []struct {
+		in   any
+		want string
+	}{
+		{math.NaN(), "NaN"},
+		{math.Inf(1), "+Inf"},
+		{math.Inf(-1), "-Inf"},
+		{float32(math.NaN()), "NaN"},
+		{float64(1.5), "1.5"},
+	}
+	for _, c := range cases {
+		if got := fmt.Sprint(NormalizeValue(c.in)); got != c.want {
+			t.Errorf("NormalizeValue(%v) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestDetectPartitionSupportRetriesAfterError 回归 issue #14：探测出错不缓存，下次重试。
+func TestDetectPartitionSupportRetriesAfterError(t *testing.T) {
+	fail := true
+	inst, _ := newMockInstance(t, dbtest.WithPartitionSupport(),
+		dbtest.WithQueryHook(func(q string) *dbtest.Result {
+			if strings.Contains(q, "parttype") && fail {
+				return dbtest.ErrorResult("mock: 瞬时错误")
+			}
+			return nil
+		}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if inst.detectPartitionSupport(ctx) {
+		t.Fatal("探测失败不应报告支持分区")
+	}
+	if inst.partitionResolved {
+		t.Fatal("探测失败不应缓存结果")
+	}
+
+	fail = false // 瞬时错误恢复
+	if !inst.detectPartitionSupport(ctx) {
+		t.Fatal("恢复后重试应成功")
+	}
+	if !inst.partitionResolved || !inst.partitionMode {
+		t.Fatal("成功后应缓存结果")
 	}
 }

@@ -28,8 +28,7 @@ var defaultBlockedFunctions = []string{
 	"pg_drop_replication_slot", "pg_create_physical_replication_slot", "pg_create_logical_replication_slot",
 	"pg_replication_origin_*", "pg_replication_slot_advance",
 	"pg_stat_reset*",
-	"pg_advisory_lock", "pg_advisory_xact_lock", "pg_advisory_unlock", "pg_advisory_unlock_all",
-	"pg_advisory_share_lock", "pg_advisory_share_lock_shared", "pg_advisory_xact_share_lock",
+	"pg_advisory*", "pg_try_advisory*", // 会话级咨询锁在只读事务中合法，必须整体拦截（含 pg_try_advisory_* / *_shared）
 	"pg_rotate_logfile", "pg_reload_conf", "pg_switch_wal",
 	"pg_wal_replay_pause", "pg_wal_replay_resume",
 	"pg_backup_start", "pg_backup_stop",
@@ -82,10 +81,15 @@ func (g *Guard) ValidateSelect(sql string) error {
 				return fmt.Errorf("检测到行锁定子句 FOR %s：只读模式禁止锁行", strings.ToUpper(toks[j+1]))
 			}
 		}
-		// 函数调用黑名单：word( 形式，取尾段以兼容 pg_catalog.dblink(...)。
-		if j+1 < len(toks) && toks[j+1] == "(" && isWordToken(t) {
-			if tail := tokenTail(t); g.isBlockedFunction(tail) {
-				return fmt.Errorf("函数 %q 在只读模式下被禁止调用", tail)
+		// 函数调用黑名单：word( 形式（含引号标识符 "fn"( )，取尾段以兼容 pg_catalog.dblink(...)。
+		// 引号标识符需剥去 \x00 前缀后再比对，否则 "dblink"( 可绕过黑名单。
+		if j+1 < len(toks) && toks[j+1] == "(" {
+			name := strings.TrimPrefix(t, "\x00")
+			if isWordToken(t) || name != t {
+				tail := tokenTail(name)
+				if g.isBlockedFunction(name, tail) {
+					return fmt.Errorf("函数 %q 在只读模式下被禁止调用", tail)
+				}
 			}
 		}
 	}
@@ -116,8 +120,13 @@ func DefaultBlockedFunctions() []string {
 	return out
 }
 
-func (g *Guard) isBlockedFunction(name string) bool {
+func (g *Guard) isBlockedFunction(full, tail string) bool {
 	for _, pat := range g.blockedFunctions {
+		// 含 schema 限定的条目（如 pg_catalog.dblink）按全名匹配，其余按尾段匹配。
+		name := tail
+		if strings.Contains(pat, ".") {
+			name = full
+		}
 		if strings.HasSuffix(pat, "*") {
 			if strings.HasPrefix(name, strings.TrimSuffix(pat, "*")) {
 				return true
@@ -189,11 +198,8 @@ func tokenize(sql string) ([]string, error) {
 				return nil, fmt.Errorf("SQL 存在未闭合的块注释")
 			}
 
-		case c == '\'': // 字符串字面量，'' 为转义；E''/U&'' 中 \' 亦为转义
-			backslash := false
-			if len(toks) > 0 && (toks[len(toks)-1] == "e" || toks[len(toks)-1] == "u") {
-				backslash = true
-			}
+		case c == '\'': // 字符串字面量，'' 为转义；紧邻的 E''/U&'' 前缀中 \' 亦为转义
+			backslash := escapePrefixAt(s, i)
 			i++
 			closed := false
 			for i < n {
@@ -218,6 +224,11 @@ func tokenize(sql string) ([]string, error) {
 			toks = append(toks, "0")
 
 		case c == '"': // 引号标识符，"" 为转义；加前缀使其不参与关键字匹配
+			if escapePrefixAt(s, i) {
+				// U&"…" 的 Unicode 转义解码超出词法职责，且可用于伪造标识符
+				// 绕过黑名单（如 U&"set_\0063onfig" → set_config），保守拒绝。
+				return nil, fmt.Errorf(`SQL 含 U&"…" Unicode 转义标识符，只读模式拒绝执行`)
+			}
 			i++
 			var sb strings.Builder
 			closed := false
@@ -324,6 +335,30 @@ func tokenize(sql string) ([]string, error) {
 	return toks, nil
 }
 
+// escapePrefixAt 判断 s[i] 处的引号是否紧邻 E / U& 前缀（E”、U&” 转义字符串语法）。
+// 前缀必须与引号逐字符相邻：列名/别名等标识符（如 "SELECT e, '\' FROM t" 中的 e）
+// 与引号之间隔着标点或空白时不得启用转义语义，否则 guard 与服务端对字符串边界的
+// 认定会错位，可被用于把危险函数调用藏进 guard 认定的"字符串"里。
+func escapePrefixAt(s string, i int) bool {
+	if i <= 0 {
+		return false
+	}
+	switch s[i-1] {
+	case 'e', 'E':
+		return i-1 == 0 || !isIdentChar(s[i-2])
+	case '&':
+		if i < 2 {
+			return false
+		}
+		switch s[i-2] {
+		case 'u', 'U':
+			return i-2 == 0 || !isIdentChar(s[i-3])
+		}
+	}
+	return false
+}
+
+// isIdentStart 判断标识符起始字符。
 func isIdentStart(c byte) bool {
 	return c == '_' || c == '$' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c >= 0x80
 }

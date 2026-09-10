@@ -141,3 +141,81 @@ func TestValidateSelectMoreBranches(t *testing.T) {
 		t.Error("默认黑名单不应为空")
 	}
 }
+
+// TestEscapeStringPrefixAdjacency 回归 issue #1：E/U& 前缀必须与引号逐字符相邻。
+// 前一个 token 恰为 "e"/"u" 但与引号隔着标点时（如列名 e、别名），不得启用反斜杠
+// 转义语义，否则字符串边界与（standard_conforming_strings=on 的）服务端错位，
+// set_config/dblink 等调用可被藏进 guard 认定的"字符串"里。
+func TestEscapeStringPrefixAdjacency(t *testing.T) {
+	g := newGuard()
+
+	blocked := []string{
+		// issue #1 原始复现：'\' 被 guard 当作未闭合转义串的开头，吞掉 set_config
+		`SELECT e, '\', set_config('statement_timeout', '0', false) --', 0`,
+		`SELECT u, '\', dblink('host=x', 'q') --', 0`,
+	}
+	for _, sql := range blocked {
+		if err := g.ValidateSelect(sql); err == nil {
+			t.Errorf("应拦截（字符串边界错位绕过）: %q", sql)
+		}
+	}
+
+	allowed := []string{
+		`SELECT e, '\' FROM t`,       // 列名 e + 普通字符串（修复误拒方向）
+		`SELECT E'it\'s' FROM t`,     // 真正的 E'' 转义串
+		`SELECT U&'d\0061ta' FROM t`, // 真正的 U&'' 转义串
+		`SELECT abe, 'x' FROM t`,     // 以 e 结尾的标识符不触发转义
+		// 真实相邻的 E'' 与服务端解释一致（'\' 为转义引号，set_config 在双方看来都在
+		// 字符串内，不会执行），不属于边界错位，应放行：
+		`SELECT t.e, E'\', set_config('a','b',false) --', 0`,
+	}
+	for _, sql := range allowed {
+		if err := g.ValidateSelect(sql); err != nil {
+			t.Errorf("应当放行 %q: %v", sql, err)
+		}
+	}
+}
+
+// TestQuotedIdentifierFunctionBlocklist 回归 issue #2：引号标识符函数名不得绕过黑名单。
+func TestQuotedIdentifierFunctionBlocklist(t *testing.T) {
+	g := newGuard()
+	blocked := []string{
+		`SELECT "dblink"('host=10.0.0.1 dbname=x', 'insert into t values(1)')`,
+		`SELECT "set_config"('statement_timeout','0',false)`,
+		`SELECT pg_catalog."pg_read_file"('postgresql.conf',0,100)`,
+		`SELECT "nextval"('s')`,
+		`SELECT "DBLINK"('h','q')`,
+	}
+	for _, sql := range blocked {
+		if err := g.ValidateSelect(sql); err == nil {
+			t.Errorf("引号标识符函数应被拦截: %q", sql)
+		}
+	}
+	// U&"…" Unicode 转义标识符：解码超出词法职责，整体拒绝。
+	if err := g.ValidateSelect(`SELECT U&"set_\0063onfig"('a','b',false)`); err == nil ||
+		!strings.Contains(err.Error(), "Unicode") {
+		t.Errorf(`U&"…" 应被保守拒绝: %v`, err)
+	}
+	// 普通引号标识符（非函数调用形态）不受影响。
+	if err := g.ValidateSelect(`SELECT "select" FROM t`); err != nil {
+		t.Errorf("引号列名应放行: %v", err)
+	}
+}
+
+// TestAdvisoryLockBlocklist 回归 issue #3：咨询锁函数按前缀通配整体拦截。
+func TestAdvisoryLockBlocklist(t *testing.T) {
+	g := newGuard()
+	blocked := []string{
+		"SELECT pg_try_advisory_lock(42)",
+		"SELECT pg_try_advisory_xact_lock_shared(1)",
+		"SELECT pg_advisory_lock_shared(1)",
+		"SELECT pg_advisory_xact_lock_shared(1)",
+		"SELECT pg_try_advisory_lock_shared(1)",
+		"SELECT pg_advisory_unlock(42)",
+	}
+	for _, sql := range blocked {
+		if err := g.ValidateSelect(sql); err == nil {
+			t.Errorf("咨询锁函数应被拦截: %q", sql)
+		}
+	}
+}

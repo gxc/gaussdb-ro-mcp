@@ -4,6 +4,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -88,8 +89,11 @@ func handleTestConnection(ctx context.Context, m *db.Manager, in struct{ instanc
 	}
 	latency := time.Since(start).Milliseconds()
 	ro, roErr := inst.ReadOnlyStatus(ctx)
+	// ok 要求会话确实为只读，与 enforceReadOnly 的判定一致：
+	// 查询成功但返回 off 时同样是故障形态（如启动参数被代理剥离）。
+	ok := roErr == nil && strings.EqualFold(ro, "on")
 	out := map[string]any{
-		"ok":                    roErr == nil,
+		"ok":                    ok,
 		"instance":              inst.Name,
 		"server_version":        info["version"],
 		"database":              info["database"],
@@ -100,6 +104,8 @@ func handleTestConnection(ctx context.Context, m *db.Manager, in struct{ instanc
 	}
 	if roErr != nil {
 		out["read_only_check_error"] = roErr.Error()
+	} else if !ok {
+		out["read_only_check_error"] = fmt.Sprintf("transaction_read_only=%s，会话并非只读", ro)
 	}
 	return nil, out, nil
 }
@@ -147,9 +153,13 @@ func handleDescribeTable(ctx context.Context, m *db.Manager, name, schema, table
 		"table":    tbl,
 		"kind":     kind,
 	}
+	// 各段尽力而为：失败时输出 <段名>_error 键，避免"无数据"与"查询失败"
+	// 在结果里不可区分。
 	if comment, est, err := inst.TableComment(ctx, oid); err == nil {
 		out["comment"] = comment
 		out["estimated_rows"] = est
+	} else {
+		out["comment_error"] = err.Error()
 	}
 	if cols, err := inst.DescribeColumns(ctx, oid); err == nil {
 		out["columns"] = cols
@@ -158,9 +168,13 @@ func handleDescribeTable(ctx context.Context, m *db.Manager, name, schema, table
 	}
 	if cons, err := inst.DescribeConstraints(ctx, oid); err == nil {
 		out["constraints"] = cons
+	} else {
+		out["constraints_error"] = err.Error()
 	}
 	if idxs, err := inst.DescribeIndexes(ctx, oid); err == nil {
 		out["indexes"] = idxs
+	} else {
+		out["indexes_error"] = err.Error()
 	}
 	if kind == "view" || kind == "materialized view" {
 		if viewdef, err := inst.ViewDefinition(ctx, oid); err == nil {
@@ -172,14 +186,13 @@ func handleDescribeTable(ctx context.Context, m *db.Manager, name, schema, table
 	// 分区信息：GaussDB/openGauss 专属，尽力而为。
 	if parts, err := inst.ListPartitions(ctx, oid); err == nil && len(parts) > 0 {
 		out["partitions"] = parts
+	} else if err != nil {
+		out["partitions_error"] = err.Error()
 	}
 	return nil, out, nil
 }
 
 func handleExecuteSelect(ctx context.Context, m *db.Manager, name, sql string, maxRows int) (*mcp.CallToolResult, any, error) {
-	if maxRows <= 0 {
-		maxRows = 0 // 由实例默认值决定
-	}
 	inst, err := m.Resolve(name)
 	if err != nil {
 		return nil, nil, err

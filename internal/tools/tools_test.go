@@ -302,3 +302,49 @@ func TestHandleExecuteSelect(t *testing.T) {
 		}
 	})
 }
+
+// TestHandleTestConnectionReadOnlyOff 回归 issue #9：只读状态为 off 时 ok 必须为 false。
+func TestHandleTestConnectionReadOnlyOff(t *testing.T) {
+	// 入池校验时为 on（连接可建立），test_connection 执行时为 off：
+	// 模拟"启动参数被剥离/会话可写"的故障形态。
+	mgr := newMockManager(t, dbtest.WithShowValues("on", "off"))
+	_, res, err := handleTestConnection(context.Background(), mgr, struct{ instanceArg }{})
+	if err != nil {
+		t.Fatalf("test_connection 不应报传输错误: %v", err)
+	}
+	out := asMap(t, res)
+	if out["ok"] != false {
+		t.Errorf("transaction_read_only=off 时 ok 应为 false: %v", out)
+	}
+	if msg, _ := out["read_only_check_error"].(string); !strings.Contains(msg, "off") {
+		t.Errorf("应附显式错误说明: %v", out["read_only_check_error"])
+	}
+}
+
+// TestHandleDescribeTablePartialErrors 回归 issue #15：各段失败都应有 <段名>_error 键。
+func TestHandleDescribeTablePartialErrors(t *testing.T) {
+	mgr := newMockManager(t, dbtest.WithQueryHook(func(q string) *dbtest.Result {
+		switch {
+		case strings.Contains(q, "pg_constraint"):
+			return dbtest.ErrorResult("mock: 约束查询失败")
+		case strings.Contains(q, "pg_index"):
+			return dbtest.ErrorResult("mock: 索引查询失败")
+		case strings.Contains(q, "obj_description(c.oid)"):
+			return dbtest.ErrorResult("mock: 注释查询失败")
+		}
+		return nil
+	}))
+	_, res, err := handleDescribeTable(context.Background(), mgr, "", "public", "mock_table")
+	if err != nil {
+		t.Fatalf("describe_table 不应整体失败: %v", err)
+	}
+	out := asMap(t, res)
+	for _, key := range []string{"comment_error", "constraints_error", "indexes_error"} {
+		if _, ok := out[key]; !ok {
+			t.Errorf("缺少 %s 键（失败被静默吞掉）: %v", key, out)
+		}
+	}
+	if _, ok := out["columns"]; !ok {
+		t.Errorf("未受影响的 columns 应正常返回: %v", out)
+	}
+}

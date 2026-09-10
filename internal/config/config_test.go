@@ -53,7 +53,7 @@ default_instance: dev
 		t.Errorf("prod 实例默认值错误: %+v", prod)
 	}
 	dsn := prod.BuildDSN()
-	want := "host=192.168.1.10 port=8000 dbname=postgres user=ro_user password=secret sslmode=disable"
+	want := "gaussdb://ro_user:secret@192.168.1.10:8000/postgres?sslmode=disable"
 	if dsn != want {
 		t.Errorf("prod DSN 错误:\n got  %s\n want %s", dsn, want)
 	}

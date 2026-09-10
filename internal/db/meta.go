@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"strconv"
-	"strings"
 )
 
 // 系统模式清单与模式匹配规则：默认从结果中排除。
@@ -36,15 +35,24 @@ func relKindExpr(partitionMode bool) string {
 // detectPartitionSupport 判断服务端是否为 openGauss/GaussDB
 // （pg_class 含 parttype 列，原生 PostgreSQL 没有）。
 func (inst *Instance) detectPartitionSupport(ctx context.Context) bool {
-	inst.partitionOnce.Do(func() {
-		rows, err := inst.Query(ctx, `SELECT count(*) AS n FROM pg_catalog.pg_attribute
-			WHERE attrelid = 'pg_catalog.pg_class'::regclass AND attname = 'parttype'`)
-		if err == nil && len(rows) > 0 {
-			if n, ok := rows[0]["n"].(int64); ok && n > 0 {
-				inst.partitionMode = true
-			}
+	inst.partitionMu.Lock()
+	defer inst.partitionMu.Unlock()
+	if inst.partitionResolved {
+		return inst.partitionMode
+	}
+	rows, err := inst.Query(ctx, `SELECT count(*) AS n FROM pg_catalog.pg_attribute
+		WHERE attrelid = 'pg_catalog.pg_class'::regclass AND attname = 'parttype'`)
+	// 探测出错（ctx 取消、连接抖动）时不缓存结果，下次调用重试；
+	// 否则瞬时错误会把分区支持永久错判为 false。
+	if err != nil {
+		return false
+	}
+	if len(rows) > 0 {
+		if n, ok := rows[0]["n"].(int64); ok && n > 0 {
+			inst.partitionMode = true
 		}
-	})
+	}
+	inst.partitionResolved = true
 	return inst.partitionMode
 }
 
@@ -85,13 +93,14 @@ func (inst *Instance) ListTables(ctx context.Context, schema string, includeSyst
 	FROM pg_catalog.pg_class c
 	JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 	WHERE c.relkind IN ('r','v','m','f','p') AND %s
-	ORDER BY 1, 2`, relKindExpr(inst.detectPartitionSupport(ctx)), cond)
+	ORDER BY 1, 2
+	LIMIT 5001`, relKindExpr(inst.detectPartitionSupport(ctx)), cond)
 
 	rows, err := inst.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}
-	const limit = 5000
+	const limit = 5000 // 服务端 LIMIT 5001 + 1 行用于截断标记，避免超大库全量物化
 	truncated := len(rows) > limit
 	if truncated {
 		rows = rows[:limit]
@@ -110,7 +119,7 @@ func (inst *Instance) ResolveTable(ctx context.Context, schema, table string) (o
 	if schema != "" {
 		rows, err := inst.Query(ctx, fmt.Sprintf(`SELECT c.oid, n.nspname AS schema_name, c.relname AS table_name, %s AS kind
 			FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-			WHERE n.nspname = $1 AND c.relname = $2`, kindExpr), schema, table)
+			WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r','v','m','f','p')`, kindExpr), schema, table)
 		if err != nil {
 			return 0, "", "", "", err
 		}
@@ -123,7 +132,7 @@ func (inst *Instance) ResolveTable(ctx context.Context, schema, table string) (o
 	rows, err := inst.Query(ctx, fmt.Sprintf(`SELECT c.oid, n.nspname AS schema_name, c.relname AS table_name, %s AS kind,
 			(n.nspname = current_schema()) AS in_current
 		FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-		WHERE c.relname = $1 AND %s
+		WHERE c.relname = $1 AND c.relkind IN ('r','v','m','f','p') AND %s
 		ORDER BY in_current DESC, n.nspname LIMIT 2`, kindExpr, systemSchemaFilter), table)
 	if err != nil {
 		return 0, "", "", "", err
@@ -269,9 +278,4 @@ func asInt64(v any) int64 {
 	default:
 		return 0
 	}
-}
-
-// QuoteIdent 以双引号安全包裹标识符。
-func QuoteIdent(s string) string {
-	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
