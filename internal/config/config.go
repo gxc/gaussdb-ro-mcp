@@ -76,6 +76,9 @@ type Instance struct {
 	SSLMode string `yaml:"sslmode"`
 	// Options 追加到连接串的额外参数，如 ["application_name=mcp", "connect_timeout=5"]。
 	Options []string `yaml:"options"`
+	// ConnectTimeout 覆盖建立 TCP 连接的超时；未设置时用服务级
+	// server.connect_timeout，DSN/options 中显式给出的 connect_timeout 优先级最高。
+	ConnectTimeout Duration `yaml:"connect_timeout"`
 
 	// MaxRows 覆盖服务级 MaxRows。
 	MaxRows int `yaml:"max_rows"`

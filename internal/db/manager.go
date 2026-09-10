@@ -27,6 +27,29 @@ import (
 	"gaussdb-ro-mcp/internal/guard"
 )
 
+// hasConnectTimeoutInDSN 判断用户是否在 DSN 或 options 中显式给出了 connect_timeout。
+func hasConnectTimeoutInDSN(icfg *config.Instance) bool {
+	if hasParamKeyIn(icfg.DSN, "connect_timeout") {
+		return true
+	}
+	for _, o := range icfg.Options {
+		if strings.HasPrefix(o, "connect_timeout=") {
+			return true
+		}
+	}
+	return false
+}
+
+// hasParamKeyIn 判断 keyword=value 形式的连接串中是否含指定键（键前为串首或空白）。
+func hasParamKeyIn(dsn, key string) bool {
+	for _, field := range strings.Fields(dsn) {
+		if strings.HasPrefix(field, key+"=") {
+			return true
+		}
+	}
+	return false
+}
+
 // Instance 是一个已就绪的数据源：连接池 + 该实例生效的配置。
 type Instance struct {
 	Name             string
@@ -76,7 +99,14 @@ func newInstance(ctx context.Context, icfg *config.Instance, cfg *config.Config)
 	}
 	poolCfg.MaxConns = int32(icfg.PoolMaxConns)
 	poolCfg.MinConns = 0
-	poolCfg.ConnConfig.ConnectTimeout = time.Duration(cfg.Server.ConnectTimeout)
+	// 连接超时优先级：实例级 connect_timeout > DSN/options 中显式给出的
+	// connect_timeout（ParseConfig 已解析进 ConnectTimeout，不覆盖）> 服务级默认。
+	switch {
+	case icfg.ConnectTimeout > 0:
+		poolCfg.ConnConfig.ConnectTimeout = time.Duration(icfg.ConnectTimeout)
+	case !hasConnectTimeoutInDSN(icfg):
+		poolCfg.ConnConfig.ConnectTimeout = time.Duration(cfg.Server.ConnectTimeout)
+	}
 
 	// 会话级只读强制：default_transaction_read_only=on 随启动包下发，在
 	// 会话初始化时（任何事务开始之前）生效。GaussDB 禁止在事务中修改该

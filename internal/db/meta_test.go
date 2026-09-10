@@ -555,3 +555,63 @@ func TestDetectPartitionSupportRetriesAfterError(t *testing.T) {
 		t.Fatal("成功后应缓存结果")
 	}
 }
+
+// TestConnectTimeoutPrecedence 回归 issue #7：连接超时的三级优先级
+// （实例级字段 > DSN/options 显式值 > 服务级默认），不再无条件覆盖。
+func TestConnectTimeoutPrecedence(t *testing.T) {
+	base := func() *config.Config {
+		return &config.Config{
+			Server: config.Server{
+				MaxRows:        500,
+				MaxRowsCap:     10000,
+				ConnectTimeout: config.Duration(10 * time.Second),
+			},
+			DefaultInstance: "mock",
+		}
+	}
+	mkInst := func(inst *config.Instance) *Instance {
+		cfg := base()
+		cfg.Instances = []*config.Instance{inst}
+		in, err := newInstance(context.Background(), inst, cfg)
+		if err != nil {
+			t.Fatalf("newInstance 失败: %v", err)
+		}
+		t.Cleanup(in.pool.Close)
+		return in
+	}
+
+	t.Run("DSN显式connect_timeout优先", func(t *testing.T) {
+		inst := mkInst(&config.Instance{
+			Name: "mock", Host: "127.0.0.1", Port: 15432, Database: "db",
+			User: "u", Password: "p", SSLMode: "disable", PoolMaxConns: 1,
+			StatementTimeout: config.Duration(5 * time.Second),
+			Options:          []string{"connect_timeout=1"},
+		})
+		if got := inst.pool.Config().ConnConfig.ConnectTimeout; got != time.Second {
+			t.Errorf("connect_timeout=1 应生效（不被服务级 10s 覆盖），实际 %s", got)
+		}
+	})
+
+	t.Run("实例级字段优先于服务级", func(t *testing.T) {
+		inst := mkInst(&config.Instance{
+			Name: "mock", Host: "127.0.0.1", Port: 15432, Database: "db",
+			User: "u", Password: "p", SSLMode: "disable", PoolMaxConns: 1,
+			StatementTimeout: config.Duration(5 * time.Second),
+			ConnectTimeout:   config.Duration(3 * time.Second),
+		})
+		if got := inst.pool.Config().ConnConfig.ConnectTimeout; got != 3*time.Second {
+			t.Errorf("实例级 connect_timeout 应生效，实际 %s", got)
+		}
+	})
+
+	t.Run("未设置时用服务级默认", func(t *testing.T) {
+		inst := mkInst(&config.Instance{
+			Name: "mock", Host: "127.0.0.1", Port: 15432, Database: "db",
+			User: "u", Password: "p", SSLMode: "disable", PoolMaxConns: 1,
+			StatementTimeout: config.Duration(5 * time.Second),
+		})
+		if got := inst.pool.Config().ConnConfig.ConnectTimeout; got != 10*time.Second {
+			t.Errorf("应回退服务级 connect_timeout，实际 %s", got)
+		}
+	})
+}

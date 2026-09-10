@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -30,6 +31,11 @@ func main() {
 
 	logger := log.New(os.Stderr, "[gaussdb-ro-mcp] ", log.LstdFlags)
 	if err := start(*configPath, *showVersion, version, logger); err != nil {
+		if errors.Is(err, context.Canceled) {
+			// SIGINT/SIGTERM 触发的正常关闭：以退出码 0 结束，而非记为崩溃。
+			logger.Printf("收到退出信号，已正常关闭")
+			return
+		}
 		logger.Fatalf("gaussdb-ro-mcp 退出: %v", err)
 	}
 }
