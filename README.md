@@ -33,9 +33,9 @@
 用 `install` 安装到 `/usr/local/bin`（其他架构或内网环境可自行构建，见下节）：
 
 ```bash
-curl -LO https://github.com/gxc/gaussdb-ro-mcp/releases/download/v0.1.1/gaussdb-ro-mcp-v0.1.1-linux-amd64
-sudo install -Dm 755 gaussdb-ro-mcp-v0.1.1-linux-amd64 /usr/local/bin/gaussdb-ro-mcp
-gaussdb-ro-mcp --version   # v0.1.1
+curl -LO https://github.com/gxc/gaussdb-ro-mcp/releases/latest/download/gaussdb-ro-mcp-linux-amd64
+sudo install -Dm 755 gaussdb-ro-mcp-linux-amd64 /usr/local/bin/gaussdb-ro-mcp
+gaussdb-ro-mcp --version
 ```
 
 ## 构建
