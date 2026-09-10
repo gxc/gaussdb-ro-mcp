@@ -175,6 +175,16 @@ type connState struct {
 	pending    map[string]bool   // 刚 Parse 完、等待 Bind 的语句：Bind 时复用 Parse 时计算的结果
 	res        *Result
 	errMode    bool
+	inTx       bool // 会话是否处于事务中：ReadyForQuery 状态字节的来源
+}
+
+// readyZ 返回携带当前事务状态的 ReadyForQuery 消息（协议要求 BEGIN 后为 'T'）。
+func readyZ(st *connState) []byte {
+	status := byte('I')
+	if st.inTx {
+		status = 'T'
+	}
+	return msg('Z', []byte{status})
 }
 
 func (s *Server) handle(conn net.Conn) {
@@ -266,12 +276,14 @@ func (s *Server) response(typ byte, payload []byte, st *connState) []byte {
 		st.lastQuery = cstr(payload)
 		st.res = s.computeResult(st.lastQuery, st)
 		if st.res.errMsg != "" {
-			st.errMode = true
-			return append(errorResponse(st.res.errMsg), msg('Z', []byte{'I'})...)
+			// 不闩 errMode：简单查询以 ReadyForQuery 收尾，下一轮（可能是
+			// 扩展协议的 Describe/Execute）不应再被上一轮的错误抑制。
+			st.pending = map[string]bool{} // 出错周期作废：未 Bind 的 Parse 一并失效
+			return append(errorResponse(st.res.errMsg), readyZ(st)...)
 		}
 		out := append(resDescription(st.res), resData(st.res)...)
 		out = append(out, msg('C', cbytes(resTag(st.res)))...)
-		return append(out, msg('Z', []byte{'I'})...)
+		return append(out, readyZ(st)...)
 
 	case 'P': // Parse：name\0 query\0 int16 参数个数 + 参数 OID…
 		parts := bytes.SplitN(payload, []byte{0}, 3)
@@ -288,6 +300,7 @@ func (s *Server) response(typ byte, payload []byte, st *connState) []byte {
 		st.res = s.computeResult(st.lastQuery, st)
 		if st.res.errMsg != "" {
 			st.errMode = true
+			st.pending = map[string]bool{} // 出错周期作废：未 Bind 的 Parse 一并失效
 			return errorResponse(st.res.errMsg)
 		}
 		return msg('1', nil) // ParseComplete
@@ -327,13 +340,17 @@ func (s *Server) response(typ byte, payload []byte, st *connState) []byte {
 		}
 		if st.res.errMsg != "" {
 			st.errMode = true
+			st.pending = map[string]bool{} // 出错周期作废：未 Bind 的 Parse 一并失效
 			return errorResponse(st.res.errMsg)
 		}
 		return append(resData(st.res), msg('C', cbytes(resTag(st.res)))...)
 
 	case 'S': // Sync
 		st.errMode = false
-		return msg('Z', []byte{'I'})
+		// 注意不能在此清 pending：驱动（扩展协议两轮模式 P·D·S / B·D·E·S）
+		// 在 Parse 与 Bind 之间合法地隔着一个 Sync；pending 的失效只发生在
+		// 出错周期（见 'Q'/'P'/'E' 错误分支）。
+		return readyZ(st)
 
 	case 'C': // Close
 		return msg('3', nil) // CloseComplete
@@ -351,6 +368,13 @@ func (s *Server) computeResult(query string, st *connState) *Result {
 		}
 	}
 	u := strings.ToUpper(query)
+	// 维护会话事务状态（供 ReadyForQuery 状态字节使用，与真实服务端一致）。
+	switch {
+	case strings.HasPrefix(u, "BEGIN"), strings.HasPrefix(u, "START"):
+		st.inTx = true
+	case strings.HasPrefix(u, "COMMIT"), strings.HasPrefix(u, "END"), strings.HasPrefix(u, "ROLLBACK"):
+		st.inTx = false
+	}
 	switch {
 	case strings.Contains(u, "TRANSACTION_READ_ONLY"):
 		idx := st.showIdx
