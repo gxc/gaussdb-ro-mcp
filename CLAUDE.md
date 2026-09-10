@@ -35,7 +35,7 @@ go run ./scripts/devseed "host=127.0.0.1 port=15433 user=gaussdb password=Gaussd
 
 1. **SQL 静态校验**（`internal/guard`）：`Guard.ValidateSelect` 只放行单条 SELECT/WITH。手写词法分析器 `tokenize` 把 SQL 归一化为小写 token 流——字符串字面量/dollar-quoted 替换为占位符 `"0"`，注释丢弃，引号标识符加 `\x00` 前缀使其不参与关键字匹配。拦截规则：首词必须 select/with（跳过前导括号）、任意位置出现 DML 关键字（含 CTE 内）、`INTO`、`FOR UPDATE/SHARE`、`;` 后再有内容（多语句）、危险函数黑名单（`dblink*` 等，尾段匹配以兼容 `pg_catalog.dblink(...)`，支持 `*` 前缀通配，可用配置覆盖）。
 
-2. **会话级强制**（`internal/db`）：`default_transaction_read_only=on` 通过连接池的 `RuntimeParams` **随启动包下发**——GaussDB 禁止在事务内修改该参数（SQLSTATE 55P02），所以不能建连后再 SET。`AfterConnect` 钩子（`enforceReadOnly`）回读 `SHOW transaction_read_only` 验证；未生效时 ROLLBACK 清理残留事务后回退会话级 `SET ... READ ONLY` 重试，仍失败则拒绝连接入池。另设置 `statement_timeout`。
+2. **事务级强制**（`internal/db`）：GaussDB 分布式版仅支持事务级只读设置，所有查询统一在显式只读事务中执行——`queryReadOnly`（manager.go）按 `BEGIN` → `SET LOCAL TRANSACTION READ ONLY` → 查询 → `COMMIT` 的顺序执行（出错 ROLLBACK；BEGIN 失败时先 ROLLBACK 清理服务端复用会话的残留事务再重试一次），由服务端拒绝事务内一切写入。`AfterConnect` 仅设置 `statement_timeout`（亚毫秒钳制为 1ms）。
 
 3. **部署层**（README）：建议使用仅授予 SELECT 权限的数据库账号。
 

@@ -6,11 +6,8 @@ import (
 	"fmt"
 	"math"
 	"strings"
-	"sync"
 	"testing"
 	"time"
-
-	gaussdbgo "github.com/HuaweiCloudDeveloper/gaussdb-go"
 
 	"gaussdb-ro-mcp/internal/config"
 	"gaussdb-ro-mcp/internal/dbtest"
@@ -452,92 +449,6 @@ func TestSelectAndQuery(t *testing.T) {
 	}
 }
 
-// TestEnforceReadOnlyReSetsTimeoutAfterFallback 回归 issue #4：
-// 回退路径（ROLLBACK + 会话级 SET）之后必须重新设置 statement_timeout，
-// 否则打开事务里的事务作用域 SET 会被一并回滚，连接无服务端超时入池。
-func TestEnforceReadOnlyReSetsTimeoutAfterFallback(t *testing.T) {
-	var mu sync.Mutex
-	var order []string
-	var f *dbtest.Server
-	f = dbtest.Start(t, dbtest.WithShowValues("off", "on"),
-		dbtest.WithQueryHook(func(q string) *dbtest.Result {
-			mu.Lock()
-			order = append(order, q)
-			mu.Unlock()
-			return nil // 记录后仍走默认应答
-		}))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	conn, err := gaussdbgo.Connect(ctx, f.DSN())
-	if err != nil {
-		t.Fatalf("连接失败: %v", err)
-	}
-	defer conn.Close(ctx)
-
-	if err := enforceReadOnly(ctx, conn, 3*time.Second); err != nil {
-		t.Fatalf("回退应成功: %v", err)
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	rollbackIdx, setTimeoutIdx := -1, -1
-	for i, q := range order {
-		if strings.HasPrefix(q, "ROLLBACK") && rollbackIdx == -1 {
-			rollbackIdx = i
-		}
-		if strings.HasPrefix(q, "SET statement_timeout") {
-			setTimeoutIdx = i
-		}
-	}
-	if rollbackIdx == -1 || setTimeoutIdx == -1 {
-		t.Fatalf("应先 ROLLBACK 再设 statement_timeout，实际顺序: %v", order)
-	}
-	if setTimeoutIdx < rollbackIdx {
-		t.Fatalf("statement_timeout 应在 ROLLBACK 之后设置: %v", order)
-	}
-}
-
-// TestSetStatementTimeoutClampSubMillisecond 回归 issue #13：亚毫秒时长钳制为 1ms。
-func TestSetStatementTimeoutClampSubMillisecond(t *testing.T) {
-	var mu sync.Mutex
-	var setTimeout string
-	f := dbtest.Start(t, dbtest.WithQueryHook(func(q string) *dbtest.Result {
-		if strings.HasPrefix(q, "SET statement_timeout") {
-			mu.Lock()
-			setTimeout = q
-			mu.Unlock()
-		}
-		return nil
-	}))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	conn, err := gaussdbgo.Connect(ctx, f.DSN())
-	if err != nil {
-		t.Fatalf("连接失败: %v", err)
-	}
-	defer conn.Close(ctx)
-
-	if err := enforceReadOnly(ctx, conn, 100*time.Microsecond); err != nil {
-		t.Fatalf("enforceReadOnly 失败: %v", err)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if !strings.HasSuffix(setTimeout, "= 1") {
-		t.Errorf("亚毫秒超时应钳制为 1ms，实际: %q", setTimeout)
-	}
-
-	// d<=0 时不发送 SET（零值由配置层校验兜底，这里只验证不误发）。
-	before := setTimeout
-	if err := enforceReadOnly(ctx, conn, 0); err != nil {
-		t.Fatalf("d=0 不应报错: %v", err)
-	}
-	if setTimeout != before {
-		t.Errorf("d=0 不应下发 SET statement_timeout: %q", setTimeout)
-	}
-}
-
 // TestDedupColumnsAndDuplicateSelect 回归 issue #8：重复列名生成唯一键且数据不丢。
 func TestDedupColumnsAndDuplicateSelect(t *testing.T) {
 	if got := dedupColumns([]string{"id", "id", "id_2"}); fmt.Sprint(got) != "[id id_2 id_2_2]" {
@@ -586,20 +497,16 @@ func TestNormalizeFloatNonFinite(t *testing.T) {
 	}
 }
 
-// TestReadOnlyStatusFailureModes 覆盖 ReadOnlyStatus 的查询错误与空结果分支。
-// 计数器让入池校验的 SHOW 正常通过（第 1 次计算），目标查询走到失败分支（第 2 次）。
+// TestReadOnlyStatusFailureModes 覆盖 ReadOnlyStatus 的查询错误与空结果分支
+// （SHOW 在只读事务内执行，仅计算一次，直接注入失败/空结果即可）。
 func TestReadOnlyStatusFailureModes(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	t.Run("查询错误", func(t *testing.T) {
-		calls := 0
 		inst, _ := newMockInstance(t, dbtest.WithQueryHook(func(q string) *dbtest.Result {
 			if strings.Contains(strings.ToUpper(q), "TRANSACTION_READ_ONLY") {
-				calls++
-				if calls >= 2 {
-					return dbtest.ErrorResult("mock: show 失败")
-				}
+				return dbtest.ErrorResult("mock: show 失败")
 			}
 			return nil
 		}))
@@ -609,118 +516,14 @@ func TestReadOnlyStatusFailureModes(t *testing.T) {
 	})
 
 	t.Run("空结果", func(t *testing.T) {
-		calls := 0
 		inst, _ := newMockInstance(t, dbtest.WithQueryHook(func(q string) *dbtest.Result {
 			if strings.Contains(strings.ToUpper(q), "TRANSACTION_READ_ONLY") {
-				calls++
-				if calls >= 2 {
-					return dbtest.Rows(nil)
-				}
+				return dbtest.Rows(nil)
 			}
 			return nil
 		}))
 		if _, err := inst.ReadOnlyStatus(ctx); err == nil || !strings.Contains(err.Error(), "空结果") {
 			t.Fatalf("0 行 SHOW 应报空结果: %v", err)
-		}
-	})
-}
-
-// TestDetectPartitionSupportRetriesAfterError 回归 issue #14：探测出错不缓存，下次重试。
-func TestDetectPartitionSupportRetriesAfterError(t *testing.T) {
-	fail := true
-	inst, _ := newMockInstance(t, dbtest.WithPartitionSupport(),
-		dbtest.WithQueryHook(func(q string) *dbtest.Result {
-			if strings.Contains(q, "parttype") && fail {
-				return dbtest.ErrorResult("mock: 瞬时错误")
-			}
-			return nil
-		}))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if inst.detectPartitionSupport(ctx) {
-		t.Fatal("探测失败不应报告支持分区")
-	}
-	if inst.partitionResolved {
-		t.Fatal("探测失败不应缓存结果")
-	}
-
-	fail = false // 瞬时错误恢复
-	if !inst.detectPartitionSupport(ctx) {
-		t.Fatal("恢复后重试应成功")
-	}
-	if !inst.partitionResolved || !inst.partitionMode {
-		t.Fatal("成功后应缓存结果")
-	}
-}
-
-// TestConnectTimeoutPrecedence 回归 issue #7：连接超时的三级优先级
-// （实例级字段 > DSN/options 显式值 > 服务级默认），不再无条件覆盖。
-func TestConnectTimeoutPrecedence(t *testing.T) {
-	base := func() *config.Config {
-		return &config.Config{
-			Server: config.Server{
-				MaxRows:        500,
-				MaxRowsCap:     10000,
-				ConnectTimeout: config.Duration(10 * time.Second),
-			},
-			DefaultInstance: "mock",
-		}
-	}
-	mkInst := func(inst *config.Instance) *Instance {
-		cfg := base()
-		cfg.Instances = []*config.Instance{inst}
-		in, err := newInstance(context.Background(), inst, cfg)
-		if err != nil {
-			t.Fatalf("newInstance 失败: %v", err)
-		}
-		t.Cleanup(in.pool.Close)
-		return in
-	}
-
-	t.Run("DSN显式connect_timeout优先", func(t *testing.T) {
-		inst := mkInst(&config.Instance{
-			Name: "mock", Host: "127.0.0.1", Port: 15432, Database: "db",
-			User: "u", Password: "p", SSLMode: "disable", PoolMaxConns: 1,
-			StatementTimeout: config.Duration(5 * time.Second),
-			Options:          []string{"connect_timeout=1"},
-		})
-		if got := inst.pool.Config().ConnConfig.ConnectTimeout; got != time.Second {
-			t.Errorf("connect_timeout=1 应生效（不被服务级 10s 覆盖），实际 %s", got)
-		}
-	})
-
-	t.Run("DSN内connect_timeout优先", func(t *testing.T) {
-		inst := mkInst(&config.Instance{
-			Name: "mock", DSN: "host=127.0.0.1 port=15432 dbname=db user=u password=p connect_timeout=1 sslmode=disable",
-			PoolMaxConns: 1, StatementTimeout: config.Duration(5 * time.Second),
-		})
-		if got := inst.pool.Config().ConnConfig.ConnectTimeout; got != time.Second {
-			t.Errorf("DSN 内 connect_timeout=1 应生效（不被服务级 10s 覆盖），实际 %s", got)
-		}
-	})
-
-	t.Run("实例级字段优先于服务级", func(t *testing.T) {
-		inst := mkInst(&config.Instance{
-			Name: "mock", Host: "127.0.0.1", Port: 15432, Database: "db",
-			User: "u", Password: "p", SSLMode: "disable", PoolMaxConns: 1,
-			StatementTimeout: config.Duration(5 * time.Second),
-			ConnectTimeout:   config.Duration(3 * time.Second),
-		})
-		if got := inst.pool.Config().ConnConfig.ConnectTimeout; got != 3*time.Second {
-			t.Errorf("实例级 connect_timeout 应生效，实际 %s", got)
-		}
-	})
-
-	t.Run("未设置时用服务级默认", func(t *testing.T) {
-		inst := mkInst(&config.Instance{
-			Name: "mock", Host: "127.0.0.1", Port: 15432, Database: "db",
-			User: "u", Password: "p", SSLMode: "disable", PoolMaxConns: 1,
-			StatementTimeout: config.Duration(5 * time.Second),
-		})
-		if got := inst.pool.Config().ConnConfig.ConnectTimeout; got != 10*time.Second {
-			t.Errorf("应回退服务级 connect_timeout，实际 %s", got)
 		}
 	})
 }

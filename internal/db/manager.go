@@ -1,11 +1,10 @@
-// Package db 管理多个 GaussDB 实例的连接池，并在会话层强制只读。
+// Package db 管理多个 GaussDB 实例的连接池，并在事务层强制只读。
 //
-// 只读通过启动参数 default_transaction_read_only=on 实现：随连接建立
-// （startup packet）在会话初始化时下发，先于任何事务生效。GaussDB 内核
-// 禁止在事务中修改该参数（SQLSTATE 55P02），因此不能依赖建连后再执行
-// SET。入池前回读 SHOW transaction_read_only 校验，未生效时清理残留事务
-// 并回退为会话级 SET 重试，仍不为 on 则拒绝该连接入池。
-// 这是只读防护的最终兜底：即使 SQL 校验被绕过，服务端也会拒绝写入。
+// GaussDB 分布式版仅支持事务级只读设置，因此所有查询统一在显式只读事务中
+// 执行：BEGIN → SET LOCAL TRANSACTION READ ONLY → 查询 → COMMIT（出错则
+// ROLLBACK），由服务端拒绝事务内的一切写操作。该方式在集中式/主备与分布
+// 式实例上通用。这是只读防护的最终兜底：即使 SQL 校验被绕过，服务端也会
+// 拒绝写入。入池连接仅设置会话级 statement_timeout。
 package db
 
 import (
@@ -108,14 +107,10 @@ func newInstance(ctx context.Context, icfg *config.Instance, cfg *config.Config)
 		poolCfg.ConnConfig.ConnectTimeout = time.Duration(cfg.Server.ConnectTimeout)
 	}
 
-	// 会话级只读强制：default_transaction_read_only=on 随启动包下发，在
-	// 会话初始化时（任何事务开始之前）生效。GaussDB 禁止在事务中修改该
-	// 参数（SQLSTATE 55P02），故不能在建连后再 SET。
-	poolCfg.ConnConfig.RuntimeParams["default_transaction_read_only"] = "on"
-
-	// 对每条入池连接校验只读已生效，并设置 statement_timeout。
+	// 入池连接仅设置会话级 statement_timeout；只读由每个查询的显式
+	// 只读事务保证（见 queryReadOnly）。
 	poolCfg.AfterConnect = func(ctx context.Context, conn *gaussdbgo.Conn) error {
-		return enforceReadOnly(ctx, conn, time.Duration(icfg.StatementTimeout))
+		return setStatementTimeout(ctx, conn, time.Duration(icfg.StatementTimeout))
 	}
 
 	pool, err := gaussdbxpool.NewWithConfig(ctx, poolCfg)
@@ -131,39 +126,8 @@ func newInstance(ctx context.Context, icfg *config.Instance, cfg *config.Config)
 	}, nil
 }
 
-// enforceReadOnly 校验连接确为只读会话；未生效时回退为会话级 SET 后重试，
-// 仍不满足则返回错误（调用方将拒绝该连接入池）。
-//
-// statement_timeout 必须在只读校验（含回退）全部完成之后设置：
-// 服务端复用会话可能残留中止/打开的事务——中止事务里任何 SET 都会报 25P02，
-// 打开事务里的 SET 会随后续 ROLLBACK 一起被回滚，导致连接无超时入池。
-func enforceReadOnly(ctx context.Context, conn *gaussdbgo.Conn, stmtTimeout time.Duration) error {
-	// default_transaction_read_only=on 已随启动包下发（见 newInstance），
-	// 此处仅回读校验。
-	if ro, err := showTransactionReadOnly(ctx, conn); err == nil && strings.EqualFold(ro, "on") {
-		return setStatementTimeout(ctx, conn, stmtTimeout)
-	}
-
-	// 回退路径：启动参数未生效（个别代理会剥离启动参数），或服务端复用的
-	// 会话残留了中止/未结束的事务（此时 SHOW 与 SET 均会失败或被回滚）。
-	// 先 ROLLBACK 清理（空闲会话仅产生 WARNING），再以会话级 SET 兜底，
-	// 最后重新校验。
-	_, _ = conn.Exec(ctx, "ROLLBACK")
-	if _, err := conn.Exec(ctx, "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY"); err != nil {
-		return fmt.Errorf("设置只读会话失败: %w", err)
-	}
-	ro, err := showTransactionReadOnly(ctx, conn)
-	if err != nil {
-		return err
-	}
-	if !strings.EqualFold(ro, "on") {
-		return fmt.Errorf("只读会话验证失败：transaction_read_only=%s，拒绝该连接", ro)
-	}
-	return setStatementTimeout(ctx, conn, stmtTimeout)
-}
-
-// setStatementTimeout 设置语句超时；亚毫秒时长向下取整会得到 0（PG 语义为禁用
-// 超时），与配置意图相反，故钳制为最小 1ms。
+// setStatementTimeout 设置会话级语句超时；亚毫秒时长向下取整会得到 0（PG 语义
+// 为禁用超时），与配置意图相反，故钳制为最小 1ms。
 func setStatementTimeout(ctx context.Context, conn *gaussdbgo.Conn, d time.Duration) error {
 	if d <= 0 {
 		return nil
@@ -176,14 +140,6 @@ func setStatementTimeout(ctx context.Context, conn *gaussdbgo.Conn, d time.Durat
 		return fmt.Errorf("设置 statement_timeout 失败: %w", err)
 	}
 	return nil
-}
-
-func showTransactionReadOnly(ctx context.Context, conn *gaussdbgo.Conn) (string, error) {
-	var ro string
-	if err := conn.QueryRow(ctx, "SHOW transaction_read_only").Scan(&ro); err != nil {
-		return "", fmt.Errorf("验证只读状态失败: %w", err)
-	}
-	return ro, nil
 }
 
 // Resolve 按名称取实例；name 为空时返回默认实例。
@@ -230,18 +186,17 @@ type SelectResult struct {
 }
 
 // Select 执行一条已通过 guard 校验的 SELECT，返回至多 maxRows 行。
-// ctx 需已带超时；服务端另有 statement_timeout 兜底。
+// 查询在显式只读事务中执行；ctx 需已带超时，服务端另有 statement_timeout 兜底。
 func (inst *Instance) Select(ctx context.Context, sql string, maxRows int) (*SelectResult, error) {
 	start := time.Now()
-	rows, err := inst.pool.Query(ctx, sql)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	cols := dedupColumns(columnNames(rows.FieldDescriptions()))
-	res := &SelectResult{Columns: cols}
-	res.Rows, res.Truncated, err = collectRows(rows, cols, maxRows)
+	res := &SelectResult{}
+	err := inst.queryReadOnly(ctx, sql, nil, func(rows gaussdbgo.Rows) error {
+		cols := dedupColumns(columnNames(rows.FieldDescriptions()))
+		res.Columns = cols
+		var err error
+		res.Rows, res.Truncated, err = collectRows(rows, cols, maxRows)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -251,16 +206,75 @@ func (inst *Instance) Select(ctx context.Context, sql string, maxRows int) (*Sel
 }
 
 // Query 执行元数据小查询并返回 map 行列表（供 meta 查询复用）。
+// 查询在显式只读事务中执行。
 func (inst *Instance) Query(ctx context.Context, sql string, args ...any) ([]map[string]any, error) {
-	rows, err := inst.pool.Query(ctx, sql, args...)
+	var out []map[string]any
+	err := inst.queryReadOnly(ctx, sql, args, func(rows gaussdbgo.Rows) error {
+		cols := dedupColumns(columnNames(rows.FieldDescriptions()))
+		var err error
+		out, _, err = collectRows(rows, cols, math.MaxInt)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	return out, nil
+}
 
-	cols := dedupColumns(columnNames(rows.FieldDescriptions()))
-	out, _, err := collectRows(rows, cols, math.MaxInt)
-	return out, err
+// queryReadOnly 在显式只读事务中执行查询并收集结果：
+//
+//	BEGIN → SET LOCAL TRANSACTION READ ONLY → 查询 → COMMIT（出错 ROLLBACK）
+//
+// GaussDB 分布式版仅支持事务级只读设置，该方式在集中式/主备与分布式上通用；
+// 只读事务由服务端拒绝事务内的一切写操作。collect 在事务内消费完整结果。
+func (inst *Instance) queryReadOnly(ctx context.Context, sql string, args []any, collect func(gaussdbgo.Rows) error) error {
+	c, err := inst.pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("获取连接失败: %w", err)
+	}
+	defer c.Release()
+
+	begin := func() error {
+		_, err := c.Exec(ctx, "BEGIN")
+		return err
+	}
+	if err := begin(); err != nil {
+		// 服务端复用的会话可能残留未结束/中止的事务（任何命令都会报错）：
+		// ROLLBACK 清理后重试一次。
+		if _, rbErr := c.Exec(ctx, "ROLLBACK"); rbErr != nil {
+			return fmt.Errorf("开启只读事务失败: %w", err)
+		}
+		if err := begin(); err != nil {
+			return fmt.Errorf("开启只读事务失败: %w", err)
+		}
+	}
+	if _, err := c.Exec(ctx, "SET LOCAL TRANSACTION READ ONLY"); err != nil {
+		_, _ = c.Exec(ctx, "ROLLBACK")
+		return fmt.Errorf("设置事务只读失败: %w", err)
+	}
+
+	rows, err := c.Query(ctx, sql, args...)
+	if err != nil {
+		_, _ = c.Exec(ctx, "ROLLBACK")
+		return err
+	}
+	collectErr := func() (err error) {
+		defer func() {
+			rows.Close()
+		}()
+		if err := collect(rows); err != nil {
+			return err
+		}
+		return rows.Err()
+	}()
+	if collectErr != nil {
+		_, _ = c.Exec(ctx, "ROLLBACK")
+		return collectErr
+	}
+	if _, err := c.Exec(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("提交只读事务失败: %w", err)
+	}
+	return nil
 }
 
 // columnNames 提取结果集列名。

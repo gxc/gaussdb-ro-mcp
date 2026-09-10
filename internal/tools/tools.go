@@ -63,7 +63,7 @@ func Register(s *mcp.Server, m *db.Manager) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "execute_select",
-		Description: "执行只读 SELECT 查询（唯一允许的 SQL 入口）。仅接受单条 SELECT/WITH 语句：禁止 DML/DDL、SELECT INTO、行锁、多语句与危险函数；连接会话被服务端强制为 READ ONLY。",
+		Description: "执行只读 SELECT 查询（唯一允许的 SQL 入口）。仅接受单条 SELECT/WITH 语句：禁止 DML/DDL、SELECT INTO、行锁、多语句与危险函数；查询在服务端强制的只读事务中执行。",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in struct {
 		instanceArg
 		SQL     string `json:"sql" jsonschema:"要执行的 SELECT 语句（必填），仅允许单条 SELECT/WITH 查询"`

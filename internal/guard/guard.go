@@ -3,8 +3,8 @@
 // 防护分多层（纵深防御）：
 //  1. 本包：仅放行单条 SELECT/WITH 查询；拦截 CTE 内 DML、SELECT ... INTO、
 //     FOR UPDATE/SHARE 锁子句、多语句、以及危险函数调用（dblink、set_config 等）。
-//  2. 会话层（internal/db）：default_transaction_read_only=on 随启动包在
-//     会话初始化时下发并回读校验，由服务端兜底拒绝一切写操作。
+//  2. 事务层（internal/db）：所有查询在显式只读事务（SET LOCAL TRANSACTION
+//     READ ONLY）中执行，由服务端兜底拒绝事务内一切写操作。
 //  3. 部署层（README）：建议使用仅授予 SELECT 权限的数据库账号。
 //
 // 词法分析会跳过字符串字面量、注释与引号标识符，因此拦截只针对

@@ -99,7 +99,7 @@ func start(configPath string, showVersion bool, ver string, logger *log.Logger) 
 		return fmt.Errorf("初始化数据源失败: %w", err)
 	}
 	defer mgr.Close()
-	logger.Printf("数据源就绪: %s（默认: %s）；会话已强制 READ ONLY", mgr.InstanceNames(), mgr.DefaultInstanceName())
+	logger.Printf("数据源就绪: %s（默认: %s）；查询统一在只读事务中执行", mgr.InstanceNames(), mgr.DefaultInstanceName())
 
 	server := mcp.NewServer(&mcp.Implementation{Name: cfg.Server.Name, Version: ver}, nil)
 	tools.Register(server, mgr)

@@ -364,6 +364,8 @@ func (s *Server) computeResult(query string, st *connState) *Result {
 		return &Result{tag: "SET"}
 	case strings.HasPrefix(u, "BEGIN"), strings.HasPrefix(u, "START"):
 		return &Result{tag: "BEGIN"}
+	case strings.HasPrefix(u, "COMMIT"), strings.HasPrefix(u, "END"):
+		return &Result{tag: "COMMIT"}
 	case strings.Contains(query, "pg_attribute") && strings.Contains(query, "parttype"):
 		n := int64(0)
 		if s.partition {

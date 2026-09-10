@@ -372,9 +372,8 @@ func TestHandleExecuteSelect(t *testing.T) {
 
 // TestHandleTestConnectionReadOnlyOff 回归 issue #9：只读状态为 off 时 ok 必须为 false。
 func TestHandleTestConnectionReadOnlyOff(t *testing.T) {
-	// 入池校验时为 on（连接可建立），test_connection 执行时为 off：
-	// 模拟"启动参数被剥离/会话可写"的故障形态。
-	mgr := newMockManager(t, dbtest.WithShowValues("on", "off"))
+	// SHOW 返回 off：模拟分布式实例仅支持事务级只读、会话默认可写的形态。
+	mgr := newMockManager(t, dbtest.WithShowValues("off"))
 	_, res, err := handleTestConnection(context.Background(), mgr, struct{ instanceArg }{})
 	if err != nil {
 		t.Fatalf("test_connection 不应报传输错误: %v", err)
@@ -387,16 +386,11 @@ func TestHandleTestConnectionReadOnlyOff(t *testing.T) {
 		t.Errorf("应附显式错误说明: %v", out["read_only_check_error"])
 	}
 
-	// ReadOnlyStatus 查询本身失败：同样 ok=false，错误说明取自查询错误
-	// （第 1 次计算留给入池校验，第 2 次注入错误）。
+	// ReadOnlyStatus 查询本身失败：同样 ok=false，错误说明取自查询错误。
 	ctx := context.Background()
-	calls := 0
 	mgr2 := newMockManager(t, dbtest.WithQueryHook(func(q string) *dbtest.Result {
 		if strings.Contains(strings.ToUpper(q), "TRANSACTION_READ_ONLY") {
-			calls++
-			if calls >= 2 {
-				return dbtest.ErrorResult("mock: show 失败")
-			}
+			return dbtest.ErrorResult("mock: show 失败")
 		}
 		return nil
 	}))

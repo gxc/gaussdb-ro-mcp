@@ -6,6 +6,8 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+
+	gaussdbgo "github.com/HuaweiCloudDeveloper/gaussdb-go"
 )
 
 // 系统模式清单与模式匹配规则：默认从结果中排除。
@@ -236,16 +238,27 @@ func (inst *Instance) ServerInfo(ctx context.Context) (map[string]any, error) {
 	return rows[0], nil
 }
 
-// ReadOnlyStatus 返回当前会话只读状态（应恒为 on）。
+// ReadOnlyStatus 返回只读事务内的会话只读状态（应恒为 on）。
+// 查询在显式只读事务中执行，与业务查询使用同一套强制机制。
 func (inst *Instance) ReadOnlyStatus(ctx context.Context) (string, error) {
-	rows, err := inst.Query(ctx, "SHOW transaction_read_only")
-	if err != nil {
-		return "", err
-	}
-	if len(rows) == 0 {
-		return "", fmt.Errorf("空结果")
-	}
-	return asString(rows[0]["transaction_read_only"]), nil
+	var ro string
+	err := inst.queryReadOnly(ctx, "SHOW transaction_read_only", nil, func(rows gaussdbgo.Rows) error {
+		if !rows.Next() {
+			if err := rows.Err(); err != nil {
+				return err
+			}
+			return fmt.Errorf("空结果")
+		}
+		values, err := rows.Values()
+		if err != nil {
+			return err
+		}
+		if len(values) > 0 {
+			ro = asString(NormalizeValue(values[0]))
+		}
+		return nil
+	})
+	return ro, err
 }
 
 func asString(v any) string {
