@@ -11,9 +11,9 @@ import (
 	"context"
 	"database/sql/driver"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -27,35 +27,6 @@ import (
 	"gaussdb-ro-mcp/internal/guard"
 )
 
-// hasConnectTimeoutInDSN 判断用户是否在 DSN 或 options 中显式给出了 connect_timeout。
-// 同时覆盖 keyword=value（空白分隔字段）与 URL 查询参数（?connect_timeout=1）两种形式。
-func hasConnectTimeoutInDSN(icfg *config.Instance) bool {
-	if hasParamKeyIn(icfg.DSN, "connect_timeout") {
-		return true
-	}
-	if strings.Contains(icfg.DSN, "://") {
-		if u, err := url.Parse(icfg.DSN); err == nil && u.Query().Has("connect_timeout") {
-			return true
-		}
-	}
-	for _, o := range icfg.Options {
-		if strings.HasPrefix(o, "connect_timeout=") {
-			return true
-		}
-	}
-	return false
-}
-
-// hasParamKeyIn 判断 keyword=value 形式的连接串中是否含指定键（键前为串首或空白）。
-func hasParamKeyIn(dsn, key string) bool {
-	for _, field := range strings.Fields(dsn) {
-		if strings.HasPrefix(field, key+"=") {
-			return true
-		}
-	}
-	return false
-}
-
 // Instance 是一个已就绪的数据源：连接池 + 该实例生效的配置。
 type Instance struct {
 	Name             string
@@ -67,8 +38,11 @@ type Instance struct {
 	partitionMode bool
 	// partitionResolved 仅在探测成功后置位：探测出错（ctx 取消、连接抖动）
 	// 不缓存结果，下次调用重试，避免分区支持被永久错判。
-	partitionMu       sync.Mutex
-	partitionResolved bool
+	// partitionProbeCh 实现 singleflight：探测在锁外执行，并发调用只触发
+	// 一次网络往返、其余等待结果，避免持锁跨 I/O 把元数据调用全部串行化。
+	partitionMu        sync.Mutex
+	partitionResolved  bool
+	partitionProbeDone chan struct{}
 }
 
 // Manager 持有全部实例。
@@ -99,24 +73,35 @@ func NewManager(ctx context.Context, cfg *config.Config) (*Manager, error) {
 }
 
 func newInstance(ctx context.Context, icfg *config.Instance, cfg *config.Config) (*Instance, error) {
-	poolCfg, err := gaussdbxpool.ParseConfig(icfg.BuildDSN())
+	dsn := icfg.BuildDSN()
+	poolCfg, err := gaussdbxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("解析连接串失败: %w", err)
 	}
 	poolCfg.MaxConns = int32(icfg.PoolMaxConns)
 	poolCfg.MinConns = 0
-	// 连接超时优先级：实例级 connect_timeout > DSN/options 中显式给出的
-	// connect_timeout（ParseConfig 已解析进 ConnectTimeout，不覆盖）> 服务级默认。
+	// 连接超时优先级（与配置注释/示例一致）：DSN/options 中显式给出的
+	// connect_timeout（ParseConfig 已解析进 ConnectTimeout，不覆盖）>
+	// 实例级 connect_timeout 字段 > 服务级默认。
 	switch {
+	case config.DSNHasParam(dsn, "connect_timeout"):
+		// DSN/options 显式给出：保留 ParseConfig 的解析结果。
 	case icfg.ConnectTimeout > 0:
 		poolCfg.ConnConfig.ConnectTimeout = time.Duration(icfg.ConnectTimeout)
-	case !hasConnectTimeoutInDSN(icfg):
+	default:
 		poolCfg.ConnConfig.ConnectTimeout = time.Duration(cfg.Server.ConnectTimeout)
 	}
 
 	// 入池连接仅设置会话级 statement_timeout；只读由每个查询的显式
 	// 只读事务保证（见 queryReadOnly）。
 	poolCfg.AfterConnect = func(ctx context.Context, conn *gaussdbgo.Conn) error {
+		// 服务端复用交付的会话可能残留未结束/中止的事务（此后任何语句都会
+		// 报错），先清理再设置会话参数，否则该连接永远无法入池。
+		if conn.GaussdbConn().TxStatus() != 'I' {
+			if _, err := conn.Exec(ctx, "ROLLBACK"); err != nil {
+				return fmt.Errorf("清理连接残留事务失败: %w", err)
+			}
+		}
 		return setStatementTimeout(ctx, conn, time.Duration(icfg.StatementTimeout))
 	}
 
@@ -190,6 +175,9 @@ type SelectResult struct {
 	RowCount   int
 	Truncated  bool
 	DurationMS int64
+	// Warning 非空表示结果已完整读取但收尾（提交）失败：只读数据本身有效，
+	// 调用方应把结果连同警告一并呈现，而非丢弃已取回的数据。
+	Warning string
 }
 
 // Select 执行一条已通过 guard 校验的 SELECT，返回至多 maxRows 行。
@@ -205,6 +193,15 @@ func (inst *Instance) Select(ctx context.Context, sql string, maxRows int) (*Sel
 		return err
 	})
 	if err != nil {
+		var ce *errCommitFailed
+		// 结果已完整收集、仅提交失败：保留结果并附警告（回归 issue #4 类
+		// “近超时查询在 COMMIT 阶段 ctx 耗尽导致已收行全丢”）。
+		if errors.As(err, &ce) && res.Rows != nil {
+			res.Warning = ce.Error()
+			res.RowCount = len(res.Rows)
+			res.DurationMS = time.Since(start).Milliseconds()
+			return res, nil
+		}
 		return nil, err
 	}
 	res.RowCount = len(res.Rows)
@@ -228,12 +225,56 @@ func (inst *Instance) Query(ctx context.Context, sql string, args ...any) ([]map
 	return out, nil
 }
 
+// errCommitFailed 标记“结果已完整收集、仅事务提交失败”的错误：只读查询
+// 的数据不受提交成败影响，调用方（Select）可选择保留结果并附警告。
+type errCommitFailed struct{ err error }
+
+func (e *errCommitFailed) Error() string { return "提交只读事务失败: " + e.err.Error() }
+func (e *errCommitFailed) Unwrap() error { return e.err }
+
+// cleanupTx 尽力把连接清理回空闲状态。此时 ctx 可能已耗尽/取消，改用
+// 不继承取消的派生 context（带独立短超时）执行 ROLLBACK，尽量不让
+// 带事务的连接回到池里（池会将其销毁重建，代价更高）。
+func cleanupTx(ctx context.Context, c *gaussdbxpool.Conn) {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	_, _ = c.Exec(cctx, "ROLLBACK")
+}
+
+// ensureIdleTx 确保连接不处于（活动或中止的）残留事务中：对活动事务执行
+// BEGIN 只产生 WARNING 不报错，后续查询会被并入外来事务、COMMIT 替人提交，
+// 故在开启只读事务前按协议状态位先行清理。
+func ensureIdleTx(ctx context.Context, c *gaussdbxpool.Conn) error {
+	if c.Conn().GaussdbConn().TxStatus() == 'I' {
+		return nil
+	}
+	if _, err := c.Exec(ctx, "ROLLBACK"); err != nil {
+		return fmt.Errorf("清理残留事务失败: %w", err)
+	}
+	return nil
+}
+
+// verifyReadOnlyTx 在当前事务内回读只读状态。SET 语句可能被中间代理剥离
+// 或忽略，未验证生效前不得执行业务查询（fail-closed：宁可拒绝服务，
+// 不可在未生效只读的事务里执行来路不明的 SQL）。
+func verifyReadOnlyTx(ctx context.Context, c *gaussdbxpool.Conn) error {
+	var ro string
+	if err := c.QueryRow(ctx, "SHOW transaction_read_only").Scan(&ro); err != nil {
+		return fmt.Errorf("校验事务只读状态失败: %w", err)
+	}
+	if !strings.EqualFold(ro, "on") {
+		return fmt.Errorf("只读事务校验失败：transaction_read_only=%s，拒绝在该事务内执行查询", ro)
+	}
+	return nil
+}
+
 // queryReadOnly 在显式只读事务中执行查询并收集结果：
 //
-//	BEGIN → SET LOCAL TRANSACTION READ ONLY → 查询 → COMMIT（出错 ROLLBACK）
+//	BEGIN → SET LOCAL TRANSACTION READ ONLY → 回读校验 → 查询 → COMMIT
 //
 // GaussDB 分布式版仅支持事务级只读设置，该方式在集中式/主备与分布式上通用；
 // 只读事务由服务端拒绝事务内的一切写操作。collect 在事务内消费完整结果。
+// 出错路径一律 ROLLBACK 清理（用独立 context，见 cleanupTx）。
 func (inst *Instance) queryReadOnly(ctx context.Context, sql string, args []any, collect func(gaussdbgo.Rows) error) error {
 	c, err := inst.pool.Acquire(ctx)
 	if err != nil {
@@ -241,12 +282,18 @@ func (inst *Instance) queryReadOnly(ctx context.Context, sql string, args []any,
 	}
 	defer c.Release()
 
+	// 服务端复用交付的会话可能残留未结束/中止的事务。对活动事务执行 BEGIN
+	// 只产生 WARNING 不报错，查询会被并入外来事务、COMMIT 替人提交；按协议
+	// 状态位先行清理。
+	if err := ensureIdleTx(ctx, c); err != nil {
+		return err
+	}
 	begin := func() error {
 		_, err := c.Exec(ctx, "BEGIN")
 		return err
 	}
 	if err := begin(); err != nil {
-		// 服务端复用的会话可能残留未结束/中止的事务（任何命令都会报错）：
+		// 兜底：状态位为空闲但 BEGIN 仍失败（如中止态未反映到状态位），
 		// ROLLBACK 清理后重试一次。
 		if _, rbErr := c.Exec(ctx, "ROLLBACK"); rbErr != nil {
 			return fmt.Errorf("开启只读事务失败: %w", err)
@@ -256,30 +303,34 @@ func (inst *Instance) queryReadOnly(ctx context.Context, sql string, args []any,
 		}
 	}
 	if _, err := c.Exec(ctx, "SET LOCAL TRANSACTION READ ONLY"); err != nil {
-		_, _ = c.Exec(ctx, "ROLLBACK")
+		cleanupTx(ctx, c)
 		return fmt.Errorf("设置事务只读失败: %w", err)
+	}
+	if err := verifyReadOnlyTx(ctx, c); err != nil {
+		cleanupTx(ctx, c)
+		return err
 	}
 
 	rows, err := c.Query(ctx, sql, args...)
 	if err != nil {
-		_, _ = c.Exec(ctx, "ROLLBACK")
+		cleanupTx(ctx, c)
 		return err
 	}
-	collectErr := func() (err error) {
-		defer func() {
-			rows.Close()
-		}()
+	collectErr := func() error {
+		defer rows.Close() // 幂等；关闭/排空阶段的错误会写回 rows.Err()
 		if err := collect(rows); err != nil {
 			return err
 		}
+		rows.Close() // 主动关闭（排空/关闭 portal）后再读取最终错误
 		return rows.Err()
 	}()
 	if collectErr != nil {
-		_, _ = c.Exec(ctx, "ROLLBACK")
+		cleanupTx(ctx, c)
 		return collectErr
 	}
 	if _, err := c.Exec(ctx, "COMMIT"); err != nil {
-		return fmt.Errorf("提交只读事务失败: %w", err)
+		cleanupTx(ctx, c)
+		return &errCommitFailed{err}
 	}
 	return nil
 }
@@ -364,7 +415,12 @@ func NormalizeValue(v any) any {
 	case float64:
 		return normalizeFloat(t)
 	case float32:
-		return normalizeFloat(float64(t))
+		// 有限 float32 原样返回：先转 float64 会引入精度放大
+		// （float4 列的 0.1 会变成 0.10000000149011612）；仅非有限值需转字符串。
+		if math.IsNaN(float64(t)) || math.IsInf(float64(t), 0) {
+			return normalizeFloat(float64(t))
+		}
+		return t
 	case []byte:
 		if utf8.Valid(t) {
 			return string(t)

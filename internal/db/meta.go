@@ -6,8 +6,6 @@ import (
 	"context"
 	"fmt"
 	"strconv"
-
-	gaussdbgo "github.com/HuaweiCloudDeveloper/gaussdb-go"
 )
 
 // 系统模式清单与模式匹配规则：默认从结果中排除。
@@ -36,16 +34,36 @@ func relKindExpr(partitionMode bool) string {
 
 // detectPartitionSupport 判断服务端是否为 openGauss/GaussDB
 // （pg_class 含 parttype 列，原生 PostgreSQL 没有）。
+// singleflight：首个调用在锁外执行探测，并发调用等待其结果（可被 ctx 取消）；
+// 探测出错不缓存，下次调用重试，避免瞬时错误把分区支持永久错判为 false。
 func (inst *Instance) detectPartitionSupport(ctx context.Context) bool {
 	inst.partitionMu.Lock()
-	defer inst.partitionMu.Unlock()
 	if inst.partitionResolved {
+		defer inst.partitionMu.Unlock()
 		return inst.partitionMode
 	}
+	if ch := inst.partitionProbeDone; ch != nil { // 已有探测在进行：等待其完成
+		inst.partitionMu.Unlock()
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return false
+		}
+		inst.partitionMu.Lock()
+		defer inst.partitionMu.Unlock()
+		return inst.partitionMode
+	}
+	ch := make(chan struct{})
+	inst.partitionProbeDone = ch
+	inst.partitionMu.Unlock()
+
 	rows, err := inst.Query(ctx, `SELECT count(*) AS n FROM pg_catalog.pg_attribute
 		WHERE attrelid = 'pg_catalog.pg_class'::regclass AND attname = 'parttype'`)
-	// 探测出错（ctx 取消、连接抖动）时不缓存结果，下次调用重试；
-	// 否则瞬时错误会把分区支持永久错判为 false。
+
+	inst.partitionMu.Lock()
+	defer inst.partitionMu.Unlock()
+	inst.partitionProbeDone = nil
+	close(ch)
 	if err != nil {
 		return false
 	}
@@ -107,21 +125,34 @@ func (inst *Instance) ListTables(ctx context.Context, schema string, includeSyst
 	if truncated {
 		rows = rows[:limit]
 	}
-	return map[string]any{
+	out := map[string]any{
 		"tables":    rows,
 		"count":     len(rows),
 		"truncated": truncated,
-	}, nil
+	}
+	if truncated {
+		// 截断时补报真实总数，避免“截断到上限”与“恰好等于上限”不可区分。
+		// 仅在截断时才计数，常规调用不为超大库的全量计数买单。
+		if total, err := inst.Query(ctx, fmt.Sprintf(`SELECT count(*) AS n
+			FROM pg_catalog.pg_class c
+			JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+			WHERE c.relkind IN ('r','v','m','f','p') AND %s`, cond), args...); err == nil && len(total) > 0 {
+			out["total_count"] = asInt64(total[0]["n"])
+		}
+	}
+	return out, nil
 }
 
 // ResolveTable 按可选 schema + 表名定位对象，返回 (oid, schema, name, kind)。
 // 未指定 schema 时在非系统模式内搜索：当前模式优先；命中多个则报歧义。
+// 不按 relkind 过滤：序列（relkind='S'）、索引等对象同样可定位（kind 原样
+// 返回其 relkind 字符），describe_table 保留对它们的探查能力。
 func (inst *Instance) ResolveTable(ctx context.Context, schema, table string) (oid int64, ns, name, kind string, err error) {
 	kindExpr := relKindExpr(inst.detectPartitionSupport(ctx))
 	if schema != "" {
 		rows, err := inst.Query(ctx, fmt.Sprintf(`SELECT c.oid, n.nspname AS schema_name, c.relname AS table_name, %s AS kind
 			FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-			WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r','v','m','f','p')`, kindExpr), schema, table)
+			WHERE n.nspname = $1 AND c.relname = $2`, kindExpr), schema, table)
 		if err != nil {
 			return 0, "", "", "", err
 		}
@@ -134,7 +165,7 @@ func (inst *Instance) ResolveTable(ctx context.Context, schema, table string) (o
 	rows, err := inst.Query(ctx, fmt.Sprintf(`SELECT c.oid, n.nspname AS schema_name, c.relname AS table_name, %s AS kind,
 			(n.nspname = current_schema()) AS in_current
 		FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-		WHERE c.relname = $1 AND c.relkind IN ('r','v','m','f','p') AND %s
+		WHERE c.relname = $1 AND %s
 		ORDER BY in_current DESC, n.nspname LIMIT 2`, kindExpr, systemSchemaFilter), table)
 	if err != nil {
 		return 0, "", "", "", err
@@ -239,26 +270,16 @@ func (inst *Instance) ServerInfo(ctx context.Context) (map[string]any, error) {
 }
 
 // ReadOnlyStatus 返回只读事务内的会话只读状态（应恒为 on）。
-// 查询在显式只读事务中执行，与业务查询使用同一套强制机制。
+// 与业务查询使用同一套 queryReadOnly 强制与校验机制。
 func (inst *Instance) ReadOnlyStatus(ctx context.Context) (string, error) {
-	var ro string
-	err := inst.queryReadOnly(ctx, "SHOW transaction_read_only", nil, func(rows gaussdbgo.Rows) error {
-		if !rows.Next() {
-			if err := rows.Err(); err != nil {
-				return err
-			}
-			return fmt.Errorf("空结果")
-		}
-		values, err := rows.Values()
-		if err != nil {
-			return err
-		}
-		if len(values) > 0 {
-			ro = asString(NormalizeValue(values[0]))
-		}
-		return nil
-	})
-	return ro, err
+	rows, err := inst.Query(ctx, "SHOW transaction_read_only")
+	if err != nil {
+		return "", err
+	}
+	if len(rows) == 0 {
+		return "", fmt.Errorf("空结果")
+	}
+	return asString(rows[0]["transaction_read_only"]), nil
 }
 
 func asString(v any) string {

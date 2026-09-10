@@ -353,7 +353,8 @@ func TestMetaEdgeCases(t *testing.T) {
 
 	t.Run("ListTables截断", func(t *testing.T) {
 		inst, _ := newMockInstance(t, dbtest.WithQueryHook(func(q string) *dbtest.Result {
-			if strings.Contains(q, "pg_class") && strings.Contains(q, "LIMIT 5001") {
+			switch {
+			case strings.Contains(q, "pg_class") && strings.Contains(q, "LIMIT 5001"):
 				cols := []dbtest.Col{
 					dbtest.Text("schema_name", "public"), dbtest.Text("table_name", "t"),
 					dbtest.Text("kind", "table"), dbtest.Int8("estimated_rows", 1),
@@ -364,6 +365,9 @@ func TestMetaEdgeCases(t *testing.T) {
 					rows[i] = []string{"public", "t", "table", "1", ""}
 				}
 				return dbtest.Rows(cols, rows...)
+			case strings.Contains(q, "count(*)") && !strings.Contains(q, "pg_attribute"):
+				// 截断后的真实总数补查（排除分区探测的 pg_attribute 计数）。
+				return dbtest.Rows([]dbtest.Col{dbtest.Int8("n", 6000)}, []string{"6000"})
 			}
 			return nil
 		}))
@@ -373,6 +377,9 @@ func TestMetaEdgeCases(t *testing.T) {
 		}
 		if lt["truncated"] != true || lt["count"] != 5000 {
 			t.Errorf("应截断为 5000 行并标记 truncated: count=%v truncated=%v", lt["count"], lt["truncated"])
+		}
+		if lt["total_count"] != int64(6000) {
+			t.Errorf("截断时应补报真实总数 total_count: %v", lt["total_count"])
 		}
 	})
 }
@@ -489,6 +496,8 @@ func TestNormalizeFloatNonFinite(t *testing.T) {
 		{math.Inf(-1), "-Inf"},
 		{float32(math.NaN()), "NaN"},
 		{float64(1.5), "1.5"},
+		// 有限 float32 原样返回：不再被放宽成 float64（0.1f → 0.10000000149011612）。
+		{float32(0.1), "0.1"},
 	}
 	for _, c := range cases {
 		if got := fmt.Sprint(NormalizeValue(c.in)); got != c.want {
@@ -522,8 +531,10 @@ func TestReadOnlyStatusFailureModes(t *testing.T) {
 			}
 			return nil
 		}))
-		if _, err := inst.ReadOnlyStatus(ctx); err == nil || !strings.Contains(err.Error(), "空结果") {
-			t.Fatalf("0 行 SHOW 应报空结果: %v", err)
+		// 0 行 SHOW 属于故障形态：被 queryReadOnly 的事务内校验先行拦截
+		//（fail-closed），错误信息包含校验失败说明。
+		if _, err := inst.ReadOnlyStatus(ctx); err == nil || !strings.Contains(err.Error(), "校验事务只读状态失败") {
+			t.Fatalf("0 行 SHOW 应被 fail-closed 拦截: %v", err)
 		}
 	})
 }
