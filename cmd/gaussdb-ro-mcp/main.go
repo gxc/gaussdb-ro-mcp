@@ -25,6 +25,13 @@ import (
 
 var version = "dev" // 由构建时 -ldflags 注入
 
+// 项目相关地址（帮助与版本输出使用）。
+const (
+	issuesURL = "https://github.com/gxc/gaussdb-ro-mcp/issues"
+	readmeURL = "https://github.com/gxc/gaussdb-ro-mcp#readme"
+	latestURL = "https://github.com/gxc/gaussdb-ro-mcp/releases/latest"
+)
+
 func main() {
 	fs := registerFlags(flag.CommandLine)
 	flag.Usage = func() { printUsage(flag.CommandLine.Output(), version, flag.CommandLine) }
@@ -61,13 +68,14 @@ func printUsage(w io.Writer, ver string, fs *flag.FlagSet) {
 	fmt.Fprintf(w, "gaussdb-ro-mcp %s — 面向 Coding Agent 的 GaussDB 只读 MCP 服务器（stdio 传输）\n\n", ver)
 	fmt.Fprintf(w, "用法：\n  gaussdb-ro-mcp [flags]\n\n参数：\n")
 	fs.PrintDefaults()
-	fmt.Fprintf(w, "\n问题反馈：    https://github.com/gxc/gaussdb-ro-mcp/issues\n获取最新版本：https://github.com/gxc/gaussdb-ro-mcp/releases/latest\n")
+	fmt.Fprintf(w, "\n详细说明：    %s\n问题反馈：    %s\n获取最新版本： %s\n", readmeURL, issuesURL, latestURL)
 }
 
 // start 执行完整启动流程；返回错误而非直接退出，便于测试。
 func start(configPath string, showVersion bool, ver string, logger *log.Logger) error {
 	if showVersion {
 		fmt.Println(ver)
+		fmt.Println("获取最新版本：" + latestURL)
 		return nil
 	}
 	if configPath == "" {
