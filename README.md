@@ -1,6 +1,6 @@
 # gaussdb-ro-mcp
 
-面向编码代理（Claude Code、OpenCode 等）的 **GaussDB 只读 MCP 服务器**。基于
+面向 Coding Agent（Claude Code、OpenCode 等）的 **GaussDB 只读 MCP 服务器**。基于
 [GaussDB 官方 Go 驱动](https://github.com/huaweicloud-samples/database-gaussdb-go)
 （华为云官方开源的 pgx v5 适配版，源码随仓库内置于 `third_party/gaussdb-go`，支持离线构建），
 通过 stdio 传输提供数据库只读探查工具。
@@ -76,7 +76,7 @@ instances:
 default_instance: prod
 ```
 
-## 接入编码代理
+## 接入 Coding Agent
 
 ### Claude Code
 
@@ -87,14 +87,14 @@ default_instance: prod
   "mcpServers": {
     "gaussdb-readonly": {
       "command": "/usr/local/bin/gaussdb-ro-mcp",
-      "args": ["-config", "/opt/gaussdb-ro-mcp/gaussdb-ro-mcp.yaml"]
+      "args": ["-config", "/path/to/gaussdb-ro-mcp.yaml"]
     }
   }
 }
 ```
 
 ```bash
-claude mcp add gaussdb-readonly -- /usr/local/bin/gaussdb-ro-mcp -config /opt/gaussdb-ro-mcp/gaussdb-ro-mcp.yaml
+claude mcp add gaussdb-readonly -- /usr/local/bin/gaussdb-ro-mcp -config /path/to/gaussdb-ro-mcp.yaml
 ```
 
 ### OpenCode
@@ -107,7 +107,7 @@ claude mcp add gaussdb-readonly -- /usr/local/bin/gaussdb-ro-mcp -config /opt/ga
   "mcp": {
     "gaussdb-readonly": {
       "type": "local",
-      "command": ["/usr/local/bin/gaussdb-ro-mcp", "-config", "/opt/gaussdb-ro-mcp/gaussdb-ro-mcp.yaml"]
+      "command": ["/usr/local/bin/gaussdb-ro-mcp", "-config", "/path/to/gaussdb-ro-mcp.yaml"]
     }
   }
 }

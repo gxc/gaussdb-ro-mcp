@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-面向编码代理（Claude Code、OpenCode 等）的 GaussDB 只读 MCP 服务器，Go 语言实现，stdio 传输。代码注释、错误信息、文档均使用中文——新增代码保持一致。
+面向 Coding Agent（Claude Code、OpenCode 等）的 GaussDB 只读 MCP 服务器，Go 语言实现，stdio 传输。代码注释、错误信息、文档均使用中文——新增代码保持一致。
 
 ## 常用命令
 

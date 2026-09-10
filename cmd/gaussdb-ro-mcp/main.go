@@ -1,6 +1,6 @@
 // gaussdb-ro-mcp：基于 GaussDB 官方 Go 驱动的只读 MCP 服务器。
 //
-// 面向编码代理（Claude Code、OpenCode 等），通过 stdio 传输提供只读数据库工具：
+// 面向 Coding Agent（Claude Code、OpenCode 等），通过 stdio 传输提供只读数据库工具：
 // 连通性测试、schema/表清单、表结构与索引、SELECT 查询。
 package main
 
