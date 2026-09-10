@@ -60,12 +60,37 @@ func TestEnsureSSLModeDirect(t *testing.T) {
 		{"gaussdb://u@h/db?foo=1", "require", "gaussdb://u@h/db?foo=1&sslmode=require"},
 		{"host=h sslmode=disable", "require", "host=h sslmode=disable"},
 		{"host=h", "", "host=h sslmode=disable"},
-		// 含控制字符的 URL 无法解析：保守原样返回，不追加也不报错。
-		{"gaussdb://h/db\n?foo=1", "require", "gaussdb://h/db\n?foo=1"},
+		// 含控制字符的 URL 无法解析：按 kv 追加兜底，绝不返回不带 sslmode 的串。
+		{"gaussdb://h/db\n?foo=1", "require", "gaussdb://h/db\n?foo=1 sslmode=require"},
+		// 密码值中恰含 "://"：不是 URL 形式，sslmode 正常追加（回归）。
+		{"host=h password=a://b", "require", "host=h password=a://b sslmode=require"},
+		// 单引号密码值中含 " sslmode=" 伪键：不算已设置，仍追加默认值。
+		{"host=h password='my pass sslmode=x'", "", "host=h password='my pass sslmode=x' sslmode=disable"},
 	}
 	for _, c := range cases {
 		if got := ensureSSLMode(c.dsn, c.mode); got != c.want {
 			t.Errorf("ensureSSLMode(%q, %q) = %q, want %q", c.dsn, c.mode, got, c.want)
+		}
+	}
+}
+
+// TestDSNHasParam 覆盖共享的连接串参数检测助手（URL 与 kv 两种形式）。
+func TestDSNHasParam(t *testing.T) {
+	cases := []struct {
+		dsn, key string
+		want     bool
+	}{
+		{"gaussdb://h/db?connect_timeout=1", "connect_timeout", true},
+		{"gaussdb://h/db?sslmode=disable", "connect_timeout", false},
+		{"host=h connect_timeout=1", "connect_timeout", true},
+		{"host=h", "connect_timeout", false},
+		// 值内部的伪键不算（无引号但位于其他值中间的场景亦不误判）。
+		{"host=h password='my pass connect_timeout=1'", "connect_timeout", false},
+		{"host=h password=a://b", "connect_timeout", false},
+	}
+	for _, c := range cases {
+		if got := DSNHasParam(c.dsn, c.key); got != c.want {
+			t.Errorf("DSNHasParam(%q, %q) = %v, want %v", c.dsn, c.key, got, c.want)
 		}
 	}
 }
@@ -175,15 +200,51 @@ func TestEnsureSSLModePasswordSubstring(t *testing.T) {
 
 // TestDurationUnmarshalRejectsBadNumbers 回归 issue #16：NaN/负数/溢出时长应报错。
 func TestDurationUnmarshalRejectsBadNumbers(t *testing.T) {
-	for _, in := range []string{"nan", "inf", "-5", "1e18"} {
+	for _, in := range []string{"nan", "inf", "-5", "1e18", "-5s", "-1m"} {
 		var d Duration
 		if err := yaml.Unmarshal([]byte(in), &d); err == nil {
 			t.Errorf("%q 应报非法时长", in)
 		}
 	}
+	// 溢出边界回归：9223372036.8547758 秒 ×1e9 的 float64 乘积恰等于 2^63，
+	// 旧实现（> MaxInt64 判溢出）会放过它并回绕成 MinInt64。
+	var overflow Duration
+	if err := yaml.Unmarshal([]byte("9223372036.8547758"), &overflow); err == nil {
+		t.Errorf("溢出边界的秒数应报非法时长，实际得到 %d", time.Duration(overflow))
+	}
 	// 合法边界：恰好 MaxInt64 纳秒以内。
 	var d Duration
 	if err := yaml.Unmarshal([]byte("9223372036"), &d); err != nil { // ≈292 年，秒数 ×1e9 仍在 int64 内
 		t.Errorf("大但合法的秒数不应报错: %v", err)
+	}
+}
+
+// TestLoadEmptyFile 覆盖空/纯注释配置：应给出可操作错误而非裸 EOF。
+func TestLoadEmptyFile(t *testing.T) {
+	for name, content := range map[string]string{
+		"空文件":     "",
+		"纯注释":     "# 只有一行注释\n",
+		"仅空白":     "\n\n  \n",
+	} {
+		_, err := Load(writeTemp(t, content))
+		if err == nil || !strings.Contains(err.Error(), "配置文件为空") {
+			t.Errorf("%s：应报“配置文件为空”，实际: %v", name, err)
+		}
+	}
+}
+
+// TestLoadRejectsOversizedPool 回归 pool_max_conns 溢出：超界值写入 int32
+// 池配置前应显式报错，而不是静默回绕。
+func TestLoadRejectsOversizedPool(t *testing.T) {
+	content := `
+instances:
+  - name: a
+    host: h
+    database: d
+    pool_max_conns: 4294967300
+`
+	_, err := Load(writeTemp(t, content))
+	if err == nil || !strings.Contains(err.Error(), "pool_max_conns") {
+		t.Fatalf("超界 pool_max_conns 应报错: %v", err)
 	}
 }

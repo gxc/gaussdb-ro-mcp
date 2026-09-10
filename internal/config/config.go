@@ -4,7 +4,9 @@ package config
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net"
 	"net/url"
@@ -24,7 +26,10 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 	s := strings.TrimSpace(node.Value)
 	if secs, err := strconv.ParseFloat(s, 64); err == nil {
 		// 拒绝 NaN/±Inf/负数/溢出：这些值会以平台相关的方式被静默重置或损坏配置。
-		if math.IsNaN(secs) || math.IsInf(secs, 0) || secs < 0 || secs*float64(time.Second) > math.MaxInt64 {
+		// 边界用 >= 而非 >：float64(MaxInt64) 恰等于 2^63，乘积达到该值时
+		// 转换即回绕为负数（实证：9223372036.8547758 秒 → MinInt64）。
+		if math.IsNaN(secs) || math.IsInf(secs, 0) || secs < 0 ||
+			secs*float64(time.Second) >= math.MaxInt64 {
 			return fmt.Errorf("非法时长 %q", node.Value)
 		}
 		*d = Duration(time.Duration(secs * float64(time.Second)))
@@ -33,6 +38,10 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 	v, err := time.ParseDuration(s)
 	if err != nil {
 		return fmt.Errorf("非法时长 %q: %w", node.Value, err)
+	}
+	if v < 0 {
+		// 与纯数字路径保持一致：负时长一律显式报错，而非被静默换成默认值。
+		return fmt.Errorf("非法时长 %q：不允许负值", node.Value)
 	}
 	*d = Duration(v)
 	return nil
@@ -167,6 +176,11 @@ func (c *Config) validate() error {
 			return fmt.Errorf("重复的实例名: %q", inst.Name)
 		}
 		seen[inst.Name] = true
+		// 上限校验：pool_max_conns 最终写入 int32 的池配置，超界值会被静默
+		// 回绕成小值（如 4294967300 → 4），必须显式报错。
+		if inst.PoolMaxConns > 1024 {
+			return fmt.Errorf("实例 %q 的 pool_max_conns 过大（%d，上限 1024）", inst.Name, inst.PoolMaxConns)
+		}
 		if inst.DSN == "" {
 			if inst.Host == "" {
 				return fmt.Errorf("实例 %q 缺少 host（或直接提供 dsn）", inst.Name)
@@ -208,15 +222,19 @@ func (inst *Instance) BuildDSN() string {
 		sslmode = "disable" // 与 SetDefaults 的默认值一致，直接构造时同样生效
 	}
 	q.Set("sslmode", sslmode)
-	for _, o := range inst.Options {
+	mergeOptionsIntoQuery(q, inst.Options)
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// mergeOptionsIntoQuery 把 key=value 形式的附加参数合并进 URL 查询串（正确转义）。
+// BuildDSN 与 appendOptions 共用，避免两份逐字节相同的合并循环各自漂移。
+func mergeOptionsIntoQuery(q url.Values, opts []string) {
+	for _, o := range opts {
 		if i := strings.IndexByte(o, '='); i > 0 {
 			q.Set(o[:i], o[i+1:])
 		}
 	}
-	if len(q) > 0 {
-		u.RawQuery = q.Encode()
-	}
-	return u.String()
 }
 
 // appendOptions 把 key=value 形式的附加参数合并进连接串：
@@ -225,14 +243,10 @@ func appendOptions(dsn string, opts []string) string {
 	if len(opts) == 0 {
 		return dsn
 	}
-	if strings.Contains(dsn, "://") {
+	if isURLFormDSN(dsn) {
 		if u, err := url.Parse(dsn); err == nil {
 			q := u.Query()
-			for _, o := range opts {
-				if i := strings.IndexByte(o, '='); i > 0 {
-					q.Set(o[:i], o[i+1:])
-				}
-			}
+			mergeOptionsIntoQuery(q, opts)
 			u.RawQuery = q.Encode()
 			return u.String()
 		}
@@ -244,41 +258,85 @@ func joinOptions2(dsn string, opts []string) string {
 	return dsn + " " + strings.Join(opts, " ")
 }
 
-// ensureSSLMode 在连接串未指定 sslmode 时追加指定值（默认 disable）。
-// URL 形式按查询参数解析判断；keyword=value 形式按空白分隔的字段判断，
-// 避免密码值中恰含 "sslmode=" 子串时误判为已设置。
-func ensureSSLMode(dsn, mode string) string {
-	if mode == "" {
-		mode = "disable"
-	}
-	if strings.Contains(dsn, "://") {
-		u, err := url.Parse(dsn)
-		if err != nil {
-			return dsn // 无法解析，保守不动
-		}
-		if u.Query().Has("sslmode") {
-			return dsn
-		}
-		q := u.Query()
-		q.Set("sslmode", mode)
-		u.RawQuery = q.Encode()
-		return u.String()
-	}
-	if hasParamKey(dsn, "sslmode") {
-		return dsn
-	}
-	return dsn + " sslmode=" + mode
+// isURLFormDSN 判断连接串是否为 URL 形式（gaussdb://user:pass@host/db?...）。
+// "://" 必须出现在首个空白之前且其前缀是干净的 scheme 段：密码值中恰含
+// "://" 的 keyword=value 连接串（host=h password=a://b）会被 url.Parse 拒绝，
+// 不能进入 URL 处理分支（否则 sslmode 等默认参数会被整个丢掉）。
+func isURLFormDSN(dsn string) bool {
+	i := strings.Index(dsn, "://")
+	return i > 0 && !strings.ContainsAny(dsn[:i], " \t\r\n")
 }
 
-// hasParamKey 判断 keyword=value 形式的连接串中是否已含指定键。
-// 键必须位于串首或空白之后，避免密码值中恰含目标子串的误伤。
-func hasParamKey(dsn, key string) bool {
-	for _, field := range strings.Fields(dsn) {
+// splitKVFields 按空白切分 keyword=value 形式的连接串；单引号值内的空白
+// 不切分，避免 password='my pass sslmode=x' 一类值中的伪 key= 片段干扰判断。
+func splitKVFields(dsn string) []string {
+	var fields []string
+	var sb strings.Builder
+	inQuote := false
+	for i := 0; i < len(dsn); i++ {
+		c := dsn[i]
+		switch {
+		case c == '\'':
+			inQuote = !inQuote
+			sb.WriteByte(c)
+		case !inQuote && (c == ' ' || c == '\t' || c == '\r' || c == '\n'):
+			if sb.Len() > 0 {
+				fields = append(fields, sb.String())
+				sb.Reset()
+			}
+		default:
+			sb.WriteByte(c)
+		}
+	}
+	if sb.Len() > 0 {
+		fields = append(fields, sb.String())
+	}
+	return fields
+}
+
+// DSNHasParam 判断连接串中是否显式给出指定键：URL 形式查查询参数，
+// keyword=value 形式按参数位置的字段前缀判断（值内部的伪键不算）。
+// 供 config 与 db 两包共用，保证 sslmode / connect_timeout 检测口径一致。
+func DSNHasParam(dsn, key string) bool {
+	if isURLFormDSN(dsn) {
+		u, err := url.Parse(dsn)
+		return err == nil && u.Query().Has(key)
+	}
+	for _, field := range splitKVFields(dsn) {
 		if strings.HasPrefix(field, key+"=") {
 			return true
 		}
 	}
 	return false
+}
+
+// ensureSSLMode 在连接串未指定 sslmode 时追加指定值（默认 disable）。
+// URL 形式按查询参数解析判断；keyword=value 形式按参数位置判断，
+// 避免密码值中恰含 "sslmode=" 子串时误判为已设置。任何情况下都保证
+// 结果串带有 sslmode（驱动缺省 sslmode=prefer 会尝试 SSL，违背内网默认）。
+func ensureSSLMode(dsn, mode string) string {
+	if mode == "" {
+		mode = "disable"
+	}
+	if isURLFormDSN(dsn) {
+		u, err := url.Parse(dsn)
+		if err == nil {
+			if u.Query().Has("sslmode") {
+				return dsn
+			}
+			q := u.Query()
+			q.Set("sslmode", mode)
+			u.RawQuery = q.Encode()
+			return u.String()
+		}
+		// 无法解析的 URL 形式串：按 keyword=value 追加兜底，绝不返回
+		// 不带 sslmode 的连接串。
+		return dsn + " sslmode=" + mode
+	}
+	if DSNHasParam(dsn, "sslmode") {
+		return dsn
+	}
+	return dsn + " sslmode=" + mode
 }
 
 // Load 从 path 读取并解析配置文件。
@@ -293,6 +351,10 @@ func Load(path string) (*Config, error) {
 	// 而不是静默回退到默认值。
 	dec.KnownFields(true)
 	if err := dec.Decode(cfg); err != nil {
+		if errors.Is(err, io.EOF) {
+			// 空文件/纯注释文件：给可操作的错误而不是裸 EOF。
+			return nil, fmt.Errorf("配置文件为空：至少需要一个数据源 (instances)")
+		}
 		return nil, fmt.Errorf("解析配置文件失败: %w", err)
 	}
 	cfg.SetDefaults()
