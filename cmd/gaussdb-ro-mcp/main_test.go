@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"gaussdb-ro-mcp/internal/dbtest"
 )
@@ -115,9 +117,10 @@ func TestStartServesUntilEOF(t *testing.T) {
 	}
 }
 
-// TestMainFullRun 经 main() 入口完整执行一次（覆盖 flag 解析与 start 调用）。
-// 注意：main 会重复定义 flag，整个测试进程只允许调用一次 main。
-func TestMainFullRun(t *testing.T) {
+// TestMainGracefulShutdownOnSignal 经 main() 入口完整执行一次：运行中向自身发送
+// SIGINT，验证信号触发的 context.Canceled 被识别为正常关闭（回归 issue #5，
+// 不走 Fatalf/os.Exit(1)）。注意：main 会重复定义 flag，整个测试进程只调用一次。
+func TestMainGracefulShutdownOnSignal(t *testing.T) {
 	f := dbtest.Start(t)
 
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
@@ -128,9 +131,26 @@ func TestMainFullRun(t *testing.T) {
 
 	oldArgs := os.Args
 	os.Args = []string{"gaussdb-ro-mcp", "-config", cfgPath}
-	withStdinDevnull(t)
 	defer func() { os.Args = oldArgs }()
 
-	// start 内部 server.Run 读到 EOF 后正常返回，main 不应触发 Fatalf（os.Exit）。
-	main()
+	// stdin 用保持打开的管道（不发送数据），让 server.Run 阻塞直到信号到达。
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStdin := os.Stdin
+	os.Stdin = r
+	defer func() {
+		os.Stdin = oldStdin
+		r.Close()
+		w.Close()
+	}()
+
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		// NotifyContext 已接管 SIGINT，默认终止行为被屏蔽，仅取消 ctx。
+		_ = syscall.Kill(os.Getpid(), syscall.SIGINT)
+	}()
+
+	main() // 信号触发优雅退出：不应 os.Exit(1)
 }
