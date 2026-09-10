@@ -70,6 +70,16 @@ func TestConnectTimeoutPrecedence(t *testing.T) {
 		}
 	})
 
+	t.Run("URL形式DSN内connect_timeout优先", func(t *testing.T) {
+		inst := mkInst(&config.Instance{
+			Name: "mock", DSN: "gaussdb://u:p@127.0.0.1:15432/db?sslmode=disable&connect_timeout=1",
+			PoolMaxConns: 1, StatementTimeout: config.Duration(5 * time.Second),
+		})
+		if got := inst.pool.Config().ConnConfig.ConnectTimeout; got != time.Second {
+			t.Errorf("URL 查询串内 connect_timeout=1 应生效（不被服务级 10s 覆盖），实际 %s", got)
+		}
+	})
+
 	t.Run("实例级字段优先于服务级", func(t *testing.T) {
 		inst := mkInst(&config.Instance{
 			Name: "mock", Host: "127.0.0.1", Port: 15432, Database: "db",

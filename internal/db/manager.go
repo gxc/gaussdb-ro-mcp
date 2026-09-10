@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -27,9 +28,15 @@ import (
 )
 
 // hasConnectTimeoutInDSN 判断用户是否在 DSN 或 options 中显式给出了 connect_timeout。
+// 同时覆盖 keyword=value（空白分隔字段）与 URL 查询参数（?connect_timeout=1）两种形式。
 func hasConnectTimeoutInDSN(icfg *config.Instance) bool {
 	if hasParamKeyIn(icfg.DSN, "connect_timeout") {
 		return true
+	}
+	if strings.Contains(icfg.DSN, "://") {
+		if u, err := url.Parse(icfg.DSN); err == nil && u.Query().Has("connect_timeout") {
+			return true
+		}
 	}
 	for _, o := range icfg.Options {
 		if strings.HasPrefix(o, "connect_timeout=") {

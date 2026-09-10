@@ -72,4 +72,4 @@ third_party/gaussdb-go       GaussDB 官方 Go 驱动源码，经 go.mod replace
 - **stdout 是 MCP 协议通道**，所有日志必须走 stderr（现有代码用 `log.New(os.Stderr, ...)`）。
 - 驱动使用 GaussDB 扩展协议（3.51），**无法连接原生 PostgreSQL**——集成测试必须用真实 GaussDB/openGauss。
 - 集成测试由 `GAUSSDB_RO_MCP_TEST_DSN` 环境变量门控（未设置则 skip），`internal/tools/e2e_test.go` 依赖 devseed 灌入的 `sales.orders` 数据。
-- 仓库测试覆盖率维持在 90% 以上（聚合 94.2%），新增功能需配套测试；无法连库的场景用 `internal/dbtest` 的线协议 mock。
+- 仓库测试覆盖率维持在 90% 以上（当前：tools 100% / config 100% / guard 99.5% / db 97.8% / cmd 94.6%），新增功能需配套测试；无法连库的场景用 `internal/dbtest` 的线协议 mock。
