@@ -99,6 +99,10 @@ func TestValidateSelectLexicalErrors(t *testing.T) {
 		`SELECT "a""b" FROM t`,  // 引号标识符内 "" 转义
 		"SELECT 1; /* 分号后嵌套 /* b */ 块注释 */",
 		"SELECT &'x'", // & 紧邻引号但非 U& 前缀（& 位于串首边界）
+		// E 前缀对双引号标识符无语义（仅 U& 是标识符转义前缀）：
+		// 不再被误判为 U&"…" 而拒绝（服务端会给出语法错误，guard 不越权）。
+		`SELECT e"x" FROM t`,
+		`SELECT E"x" FROM t`,
 	}
 	for _, sql := range allowed {
 		if err := g.ValidateSelect(sql); err != nil {
