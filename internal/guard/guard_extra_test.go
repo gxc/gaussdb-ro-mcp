@@ -77,6 +77,8 @@ func TestValidateSelectLexicalErrors(t *testing.T) {
 		{"SELECT 1; 1", "分号后有内容"},
 		{"SELECT 1; /* 未闭合", "分号后注释未闭合"},
 		{"(((", "只有括号"},
+		{"'x'", "串首字符串：无有效查询（覆盖 escapePrefixAt 串首边界）"},
+		{"&'x'", "& 紧邻引号但位于串首：非 U& 前缀（覆盖 escapePrefixAt 短输入边界）"},
 	}
 	for _, c := range errors {
 		if err := g.ValidateSelect(c.sql); err == nil {
@@ -93,6 +95,10 @@ func TestValidateSelectLexicalErrors(t *testing.T) {
 		"SELECT 1e5, 1e-2, 1+1, 1-2",
 		"SELECT U&'x\\y'",
 		"SELECT 1 (SELECT 2)",
+		"SELECT 'it''s' FROM t", // 字符串内 '' 转义
+		`SELECT "a""b" FROM t`,  // 引号标识符内 "" 转义
+		"SELECT 1; /* 分号后嵌套 /* b */ 块注释 */",
+		"SELECT &'x'", // & 紧邻引号但非 U& 前缀（& 位于串首边界）
 	}
 	for _, sql := range allowed {
 		if err := g.ValidateSelect(sql); err != nil {
@@ -139,6 +145,24 @@ func TestValidateSelectMoreBranches(t *testing.T) {
 	}
 	if len(DefaultBlockedFunctions()) == 0 {
 		t.Error("默认黑名单不应为空")
+	}
+}
+
+// TestSchemaQualifiedBlocklistPattern 验证含 schema 限定的黑名单条目按全名匹配。
+func TestSchemaQualifiedBlocklistPattern(t *testing.T) {
+	g := New([]string{"pg_catalog.dblink"})
+	if err := g.ValidateSelect("SELECT pg_catalog.dblink('h','q')"); err == nil {
+		t.Error("schema 限定条目应按全名命中")
+	}
+	if err := g.ValidateSelect("SELECT * FROM pg_catalog.dblink('h','q') AS t"); err == nil {
+		t.Error("FROM 子句中的 schema 限定调用也应命中")
+	}
+	// 全名不同的调用不受该条目影响（由第 2/3 层兜底）。
+	if err := g.ValidateSelect("SELECT public.dblink('h','q')"); err != nil {
+		t.Errorf("public.dblink 全名不匹配 pg_catalog.dblink，不应拦截: %v", err)
+	}
+	if err := g.ValidateSelect("SELECT dblink('h','q')"); err != nil {
+		t.Errorf("无 schema 的 dblink 不匹配全名条目，不应拦截: %v", err)
 	}
 }
 

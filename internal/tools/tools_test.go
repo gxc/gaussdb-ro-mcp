@@ -116,6 +116,18 @@ func TestHandleTestConnection(t *testing.T) {
 	if _, _, err := handleTestConnection(ctx, mgr, struct{ instanceArg }{instanceArg{Instance: "nope"}}); err == nil {
 		t.Error("未知实例应报错")
 	}
+
+	// ServerInfo 查询失败 → 整体报“连接失败”。
+	bad := newMockManager(t, dbtest.WithQueryHook(func(q string) *dbtest.Result {
+		if strings.Contains(q, "version()") {
+			return dbtest.ErrorResult("mock: version 查询失败")
+		}
+		return nil
+	}))
+	if _, _, err := handleTestConnection(ctx, bad, struct{ instanceArg }{}); err == nil ||
+		!strings.Contains(err.Error(), "连接失败") {
+		t.Errorf("ServerInfo 失败应报连接失败: %v", err)
+	}
 }
 
 // TestHandleListSchemas 验证 schema 清单工具。
@@ -137,6 +149,16 @@ func TestHandleListSchemas(t *testing.T) {
 	if _, _, err := handleListSchemas(ctx, mgr, "nope", false); err == nil {
 		t.Error("未知实例应报错")
 	}
+
+	bad := newMockManager(t, dbtest.WithQueryHook(func(q string) *dbtest.Result {
+		if strings.Contains(q, "pg_namespace") {
+			return dbtest.ErrorResult("mock: namespace 查询失败")
+		}
+		return nil
+	}))
+	if _, _, err := handleListSchemas(ctx, bad, "", false); err == nil {
+		t.Error("ListSchemas 查询失败应上抛")
+	}
 }
 
 // TestHandleListTables 验证表清单工具。
@@ -154,6 +176,16 @@ func TestHandleListTables(t *testing.T) {
 	}
 	if _, _, err := handleListTables(ctx, mgr, "nope", "", false); err == nil {
 		t.Error("未知实例应报错")
+	}
+
+	bad := newMockManager(t, dbtest.WithQueryHook(func(q string) *dbtest.Result {
+		if strings.Contains(q, "pg_class") {
+			return dbtest.ErrorResult("mock: class 查询失败")
+		}
+		return nil
+	}))
+	if _, _, err := handleListTables(ctx, bad, "", "", false); err == nil {
+		t.Error("ListTables 查询失败应上抛")
 	}
 }
 
@@ -241,6 +273,36 @@ func TestHandleDescribeTable(t *testing.T) {
 			t.Errorf("分区表应有分区清单: %v", out)
 		}
 	})
+
+	t.Run("视图定义与分区查询失败", func(t *testing.T) {
+		mgr := newMockManager(t, dbtest.WithPartitionSupport(),
+			dbtest.WithQueryHook(func(q string) *dbtest.Result {
+				switch {
+				case strings.Contains(q, "pg_get_viewdef"):
+					return dbtest.ErrorResult("mock: 视图定义失败")
+				case strings.Contains(q, "pg_partition"):
+					return dbtest.ErrorResult("mock: 分区查询失败")
+				case strings.Contains(q, "AS kind"):
+					return dbtest.Rows(
+						[]dbtest.Col{dbtest.Int8("oid", 99), dbtest.Text("schema_name", "public"),
+							dbtest.Text("table_name", "v"), dbtest.Text("kind", "view")},
+						[]string{"99", "public", "v", "view"},
+					)
+				}
+				return nil
+			}))
+		_, res, err := handleDescribeTable(ctx, mgr, "", "public", "v")
+		if err != nil {
+			t.Fatalf("describe 失败: %v", err)
+		}
+		out := asMap(t, res)
+		if msg, ok := out["view_definition_error"].(string); !ok || !strings.Contains(msg, "视图定义失败") {
+			t.Errorf("应输出 view_definition_error: %v", out)
+		}
+		if msg, ok := out["partitions_error"].(string); !ok || !strings.Contains(msg, "分区查询失败") {
+			t.Errorf("应输出 partitions_error: %v", out)
+		}
+	})
 }
 
 // TestHandleExecuteSelect 覆盖 execute_select 的校验、行数与错误分支。
@@ -269,10 +331,15 @@ func TestHandleExecuteSelect(t *testing.T) {
 		if out["row_count"] != 2 || out["instance"] != "mock" {
 			t.Errorf("结果错误: %v", out)
 		}
-		// 超过 max_rows_cap 时应被钳制（这里只验证调用成功，钳制值不外显）。
+		// 超过 max_rows_cap 时应被钳制：mock 恒返回 2 行，钳制后两行都返回。
 		_, res2, err2 := handleExecuteSelect(ctx, mgr, "", "SELECT 1", 1)
 		if err2 != nil || asMap(t, res2)["row_count"] != 1 {
 			t.Errorf("max_rows=1 应截断为 1 行: %v, %v", err2, res2)
+		}
+		if _, res3, err3 := handleExecuteSelect(ctx, mgr, "", "SELECT 1", 1<<20); err3 != nil {
+			t.Errorf("超上限 max_rows 不应报错: %v", err3)
+		} else {
+			_ = res3 // 仅覆盖钳制分支
 		}
 	})
 
@@ -319,6 +386,31 @@ func TestHandleTestConnectionReadOnlyOff(t *testing.T) {
 	if msg, _ := out["read_only_check_error"].(string); !strings.Contains(msg, "off") {
 		t.Errorf("应附显式错误说明: %v", out["read_only_check_error"])
 	}
+
+	// ReadOnlyStatus 查询本身失败：同样 ok=false，错误说明取自查询错误
+	// （第 1 次计算留给入池校验，第 2 次注入错误）。
+	ctx := context.Background()
+	calls := 0
+	mgr2 := newMockManager(t, dbtest.WithQueryHook(func(q string) *dbtest.Result {
+		if strings.Contains(strings.ToUpper(q), "TRANSACTION_READ_ONLY") {
+			calls++
+			if calls >= 2 {
+				return dbtest.ErrorResult("mock: show 失败")
+			}
+		}
+		return nil
+	}))
+	_, res2, err2 := handleTestConnection(ctx, mgr2, struct{ instanceArg }{})
+	if err2 != nil {
+		t.Fatalf("test_connection 不应报传输错误: %v", err2)
+	}
+	out2 := asMap(t, res2)
+	if out2["ok"] != false {
+		t.Errorf("SHOW 失败时 ok 应为 false: %v", out2)
+	}
+	if msg, _ := out2["read_only_check_error"].(string); !strings.Contains(msg, "show 失败") {
+		t.Errorf("错误说明应取自查询错误: %v", out2["read_only_check_error"])
+	}
 }
 
 // TestHandleDescribeTablePartialErrors 回归 issue #15：各段失败都应有 <段名>_error 键。
@@ -331,6 +423,8 @@ func TestHandleDescribeTablePartialErrors(t *testing.T) {
 			return dbtest.ErrorResult("mock: 索引查询失败")
 		case strings.Contains(q, "obj_description(c.oid)"):
 			return dbtest.ErrorResult("mock: 注释查询失败")
+		case strings.Contains(q, "pg_attribute"):
+			return dbtest.ErrorResult("mock: 列查询失败")
 		}
 		return nil
 	}))
@@ -339,12 +433,9 @@ func TestHandleDescribeTablePartialErrors(t *testing.T) {
 		t.Fatalf("describe_table 不应整体失败: %v", err)
 	}
 	out := asMap(t, res)
-	for _, key := range []string{"comment_error", "constraints_error", "indexes_error"} {
+	for _, key := range []string{"comment_error", "constraints_error", "indexes_error", "columns_error"} {
 		if _, ok := out[key]; !ok {
 			t.Errorf("缺少 %s 键（失败被静默吞掉）: %v", key, out)
 		}
-	}
-	if _, ok := out["columns"]; !ok {
-		t.Errorf("未受影响的 columns 应正常返回: %v", out)
 	}
 }

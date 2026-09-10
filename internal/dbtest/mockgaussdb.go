@@ -325,6 +325,10 @@ func (s *Server) response(typ byte, payload []byte, st *connState) []byte {
 		if st.errMode {
 			return nil
 		}
+		if st.res.errMsg != "" {
+			st.errMode = true
+			return errorResponse(st.res.errMsg)
+		}
 		return append(resData(st.res), msg('C', cbytes(resTag(st.res)))...)
 
 	case 'S': // Sync

@@ -257,6 +257,23 @@ func TestResolveTableErrors(t *testing.T) {
 		}
 	})
 
+	t.Run("无schema唯一命中", func(t *testing.T) {
+		inst, _ := newMockInstance(t, dbtest.WithQueryHook(func(q string) *dbtest.Result {
+			if strings.Contains(q, "LIMIT 2") {
+				return dbtest.Rows(
+					[]dbtest.Col{dbtest.Int8("oid", 16384), dbtest.Text("schema_name", "public"),
+						dbtest.Text("table_name", "mock_table"), dbtest.Text("kind", "table")},
+					[]string{"16384", "public", "mock_table", "table"},
+				)
+			}
+			return nil
+		}))
+		oid, ns, name, kind, err := inst.ResolveTable(ctx, "", "t")
+		if err != nil || oid != 16384 || ns != "public" || name != "mock_table" || kind != "table" {
+			t.Fatalf("唯一命中应成功: %v, %d %s %s %s", err, oid, ns, name, kind)
+		}
+	})
+
 	t.Run("无schema歧义", func(t *testing.T) {
 		inst, _ := newMockInstance(t)
 		if _, _, _, _, err := inst.ResolveTable(ctx, "", "t"); err == nil ||
@@ -317,6 +334,9 @@ func TestMetaEdgeCases(t *testing.T) {
 		if _, err := inst.ListSchemas(ctx, false); err == nil {
 			t.Error("查询错误应上抛")
 		}
+		if _, err := inst.ListTables(ctx, "", false); err == nil {
+			t.Error("ListTables 查询错误应上抛")
+		}
 		if _, err := inst.ViewDefinition(ctx, 1); err == nil {
 			t.Error("查询错误应上抛")
 		}
@@ -325,6 +345,37 @@ func TestMetaEdgeCases(t *testing.T) {
 		}
 		if _, err := inst.ServerInfo(ctx); err == nil {
 			t.Error("查询错误应上抛")
+		}
+		if _, _, _, _, err := inst.ResolveTable(ctx, "public", "t"); err == nil {
+			t.Error("ResolveTable(schema) 查询错误应上抛")
+		}
+		if _, _, _, _, err := inst.ResolveTable(ctx, "", "t"); err == nil {
+			t.Error("ResolveTable(无 schema) 查询错误应上抛")
+		}
+	})
+
+	t.Run("ListTables截断", func(t *testing.T) {
+		inst, _ := newMockInstance(t, dbtest.WithQueryHook(func(q string) *dbtest.Result {
+			if strings.Contains(q, "pg_class") && strings.Contains(q, "LIMIT 5001") {
+				cols := []dbtest.Col{
+					dbtest.Text("schema_name", "public"), dbtest.Text("table_name", "t"),
+					dbtest.Text("kind", "table"), dbtest.Int8("estimated_rows", 1),
+					dbtest.Text("comment", ""),
+				}
+				rows := make([][]string, 5001)
+				for i := range rows {
+					rows[i] = []string{"public", "t", "table", "1", ""}
+				}
+				return dbtest.Rows(cols, rows...)
+			}
+			return nil
+		}))
+		lt, err := inst.ListTables(ctx, "", false)
+		if err != nil {
+			t.Fatalf("ListTables 失败: %v", err)
+		}
+		if lt["truncated"] != true || lt["count"] != 5000 {
+			t.Errorf("应截断为 5000 行并标记 truncated: count=%v truncated=%v", lt["count"], lt["truncated"])
 		}
 	})
 }
@@ -476,6 +527,15 @@ func TestSetStatementTimeoutClampSubMillisecond(t *testing.T) {
 	if !strings.HasSuffix(setTimeout, "= 1") {
 		t.Errorf("亚毫秒超时应钳制为 1ms，实际: %q", setTimeout)
 	}
+
+	// d<=0 时不发送 SET（零值由配置层校验兜底，这里只验证不误发）。
+	before := setTimeout
+	if err := enforceReadOnly(ctx, conn, 0); err != nil {
+		t.Fatalf("d=0 不应报错: %v", err)
+	}
+	if setTimeout != before {
+		t.Errorf("d=0 不应下发 SET statement_timeout: %q", setTimeout)
+	}
 }
 
 // TestDedupColumnsAndDuplicateSelect 回归 issue #8：重复列名生成唯一键且数据不丢。
@@ -524,6 +584,45 @@ func TestNormalizeFloatNonFinite(t *testing.T) {
 			t.Errorf("NormalizeValue(%v) = %q, want %q", c.in, got, c.want)
 		}
 	}
+}
+
+// TestReadOnlyStatusFailureModes 覆盖 ReadOnlyStatus 的查询错误与空结果分支。
+// 计数器让入池校验的 SHOW 正常通过（第 1 次计算），目标查询走到失败分支（第 2 次）。
+func TestReadOnlyStatusFailureModes(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	t.Run("查询错误", func(t *testing.T) {
+		calls := 0
+		inst, _ := newMockInstance(t, dbtest.WithQueryHook(func(q string) *dbtest.Result {
+			if strings.Contains(strings.ToUpper(q), "TRANSACTION_READ_ONLY") {
+				calls++
+				if calls >= 2 {
+					return dbtest.ErrorResult("mock: show 失败")
+				}
+			}
+			return nil
+		}))
+		if _, err := inst.ReadOnlyStatus(ctx); err == nil {
+			t.Fatal("SHOW 失败应上抛")
+		}
+	})
+
+	t.Run("空结果", func(t *testing.T) {
+		calls := 0
+		inst, _ := newMockInstance(t, dbtest.WithQueryHook(func(q string) *dbtest.Result {
+			if strings.Contains(strings.ToUpper(q), "TRANSACTION_READ_ONLY") {
+				calls++
+				if calls >= 2 {
+					return dbtest.Rows(nil)
+				}
+			}
+			return nil
+		}))
+		if _, err := inst.ReadOnlyStatus(ctx); err == nil || !strings.Contains(err.Error(), "空结果") {
+			t.Fatalf("0 行 SHOW 应报空结果: %v", err)
+		}
+	})
 }
 
 // TestDetectPartitionSupportRetriesAfterError 回归 issue #14：探测出错不缓存，下次重试。
@@ -589,6 +688,16 @@ func TestConnectTimeoutPrecedence(t *testing.T) {
 		})
 		if got := inst.pool.Config().ConnConfig.ConnectTimeout; got != time.Second {
 			t.Errorf("connect_timeout=1 应生效（不被服务级 10s 覆盖），实际 %s", got)
+		}
+	})
+
+	t.Run("DSN内connect_timeout优先", func(t *testing.T) {
+		inst := mkInst(&config.Instance{
+			Name: "mock", DSN: "host=127.0.0.1 port=15432 dbname=db user=u password=p connect_timeout=1 sslmode=disable",
+			PoolMaxConns: 1, StatementTimeout: config.Duration(5 * time.Second),
+		})
+		if got := inst.pool.Config().ConnConfig.ConnectTimeout; got != time.Second {
+			t.Errorf("DSN 内 connect_timeout=1 应生效（不被服务级 10s 覆盖），实际 %s", got)
 		}
 	})
 

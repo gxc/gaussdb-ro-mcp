@@ -81,13 +81,15 @@ func (g *Guard) ValidateSelect(sql string) error {
 				return fmt.Errorf("检测到行锁定子句 FOR %s：只读模式禁止锁行", strings.ToUpper(toks[j+1]))
 			}
 		}
-		// 函数调用黑名单：word( 形式（含引号标识符 "fn"( )，取尾段以兼容 pg_catalog.dblink(...)。
-		// 引号标识符需剥去 \x00 前缀后再比对，否则 "dblink"( 可绕过黑名单。
+		// 函数调用黑名单：word( 形式（含引号标识符 "fn"( )。
+		// 引号标识符需剥去 \x00 前缀后再比对，否则 "dblink"( 可绕过黑名单；
+		// 同时回溯拼接 "." 连接的限定全名（如 pg_catalog.dblink）。
 		if j+1 < len(toks) && toks[j+1] == "(" {
 			name := strings.TrimPrefix(t, "\x00")
 			if isWordToken(t) || name != t {
 				tail := tokenTail(name)
-				if g.isBlockedFunction(name, tail) {
+				full := buildFullName(toks, j, name)
+				if g.isBlockedFunction(full, tail) {
 					return fmt.Errorf("函数 %q 在只读模式下被禁止调用", tail)
 				}
 			}
@@ -292,8 +294,8 @@ func tokenize(sql string) ([]string, error) {
 			toks = append(toks, "0")
 			i = j
 
-		default: // 其余标点：仅保留括号
-			if c == '(' || c == ')' {
+		default: // 其余标点：仅保留括号与点（点用于回溯 schema 限定的函数全名）
+			if c == '(' || c == ')' || c == '.' {
 				toks = append(toks, string(c))
 			}
 			if c == ';' {
@@ -359,6 +361,22 @@ func escapePrefixAt(s string, i int) bool {
 }
 
 // isIdentStart 判断标识符起始字符。
+// buildFullName 从 toks[j] 向前回溯，把 "." 与标识符/引号标识符连接成限定全名
+// （如 pg_catalog.dblink）。遇到其他 token（关键字、括号等）即停止。
+func buildFullName(toks []string, j int, name string) string {
+	full := name
+	k := j - 1
+	for k >= 1 && toks[k] == "." && k-1 >= 0 {
+		prev := strings.TrimPrefix(toks[k-1], "\x00")
+		if prev == "" || (!isWordToken(toks[k-1]) && !strings.HasPrefix(toks[k-1], "\x00")) {
+			break
+		}
+		full = prev + "." + full
+		k -= 2
+	}
+	return full
+}
+
 func isIdentStart(c byte) bool {
 	return c == '_' || c == '$' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c >= 0x80
 }

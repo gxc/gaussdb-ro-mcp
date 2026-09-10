@@ -39,6 +39,16 @@ func TestBuildDSNWithOptions(t *testing.T) {
 	if !strings.Contains(got, "application_name=mcp") || !strings.HasPrefix(got, "gaussdb://") {
 		t.Errorf("kv 实例应生成含 options 的 URL DSN: %s", got)
 	}
+
+	// keyword=value 形式的 DSN + options：走 joinOptions2 空格追加回退。
+	kvDSN := Instance{
+		DSN:     "host=h dbname=db user=u sslmode=disable",
+		Options: []string{"application_name=mcp"},
+	}
+	got = kvDSN.BuildDSN()
+	if !strings.HasSuffix(got, "application_name=mcp") {
+		t.Errorf("kv DSN 应空格追加 options: %s", got)
+	}
 }
 
 // TestEnsureSSLModeDirect 覆盖 sslmode 追加的全部分支。
@@ -50,6 +60,8 @@ func TestEnsureSSLModeDirect(t *testing.T) {
 		{"gaussdb://u@h/db?foo=1", "require", "gaussdb://u@h/db?foo=1&sslmode=require"},
 		{"host=h sslmode=disable", "require", "host=h sslmode=disable"},
 		{"host=h", "", "host=h sslmode=disable"},
+		// 含控制字符的 URL 无法解析：保守原样返回，不追加也不报错。
+		{"gaussdb://h/db\n?foo=1", "require", "gaussdb://h/db\n?foo=1"},
 	}
 	for _, c := range cases {
 		if got := ensureSSLMode(c.dsn, c.mode); got != c.want {
@@ -92,6 +104,14 @@ func TestLoadEmptyInstanceItem(t *testing.T) {
 	_, err := Load(writeTemp(t, "instances:\n  -\n  - name: ok\n    host: h\n    database: d\n"))
 	if err == nil || !strings.Contains(err.Error(), "空项") {
 		t.Fatalf("空列表项应报错而非 panic: %v", err)
+	}
+}
+
+// TestLoadMissingDatabase 覆盖 validate 的“缺少 database”分支。
+func TestLoadMissingDatabase(t *testing.T) {
+	_, err := Load(writeTemp(t, "instances:\n  - name: a\n    host: h\n"))
+	if err == nil || !strings.Contains(err.Error(), "缺少 database") {
+		t.Fatalf("缺 database 应报错: %v", err)
 	}
 }
 
