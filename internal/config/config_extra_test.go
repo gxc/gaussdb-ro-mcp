@@ -222,9 +222,9 @@ func TestDurationUnmarshalRejectsBadNumbers(t *testing.T) {
 // TestLoadEmptyFile 覆盖空/纯注释配置：应给出可操作错误而非裸 EOF。
 func TestLoadEmptyFile(t *testing.T) {
 	for name, content := range map[string]string{
-		"空文件":     "",
-		"纯注释":     "# 只有一行注释\n",
-		"仅空白":     "\n\n  \n",
+		"空文件": "",
+		"纯注释": "# 只有一行注释\n",
+		"仅空白": "\n\n  \n",
 	} {
 		_, err := Load(writeTemp(t, content))
 		if err == nil || !strings.Contains(err.Error(), "配置文件为空") {
