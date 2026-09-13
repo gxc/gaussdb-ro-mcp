@@ -63,9 +63,8 @@ func TestStartVersion(t *testing.T) {
 	if !strings.Contains(out, "v9.9-test") {
 		t.Errorf("应打印版本号，实际 %q", out)
 	}
-	// 回归：版本输出附带获取最新版本的地址。
-	if !strings.Contains(out, latestURL) {
-		t.Errorf("版本输出应包含最新版本地址: %q", out)
+	if strings.Contains(out, latestURL) {
+		t.Errorf("版本输出不应包含最新版本地址: %q", out)
 	}
 }
 

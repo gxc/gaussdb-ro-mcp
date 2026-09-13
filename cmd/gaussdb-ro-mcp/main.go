@@ -75,7 +75,6 @@ func printUsage(w io.Writer, ver string, fs *flag.FlagSet) {
 func start(configPath string, showVersion bool, ver string, logger *log.Logger) error {
 	if showVersion {
 		fmt.Println(ver)
-		fmt.Println("最新版本：" + latestURL)
 		return nil
 	}
 	if configPath == "" {
