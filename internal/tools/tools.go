@@ -4,7 +4,6 @@ package tools
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -88,12 +87,14 @@ func handleTestConnection(ctx context.Context, m *db.Manager, in struct{ instanc
 		return nil, nil, fmt.Errorf("实例 %q 连接失败: %w", inst.Name, err)
 	}
 	latency := time.Since(start).Milliseconds()
+	// ReadOnlyStatus 在只读事务内回读并 fail-closed 校验：
+	// 失败时返回错误（此时不提供任何结果），成功时必为 on。
 	ro, roErr := inst.ReadOnlyStatus(ctx)
-	// ok 要求会话确实为只读，与只读事务机制的预期一致：
-	// 查询成功但返回 off 时同样是故障形态（如只读事务未被服务端接受）。
-	ok := roErr == nil && strings.EqualFold(ro, "on")
+	if roErr != nil {
+		return nil, nil, fmt.Errorf("实例 %q 只读事务校验失败: %w", inst.Name, roErr)
+	}
 	out := map[string]any{
-		"ok":                    ok,
+		"ok":                    true,
 		"instance":              inst.Name,
 		"server_version":        info["version"],
 		"database":              info["database"],
@@ -101,11 +102,6 @@ func handleTestConnection(ctx context.Context, m *db.Manager, in struct{ instanc
 		"server_start_time":     info["server_start_time"],
 		"latency_ms":            latency,
 		"transaction_read_only": ro,
-	}
-	if roErr != nil {
-		out["read_only_check_error"] = roErr.Error()
-	} else if !ok {
-		out["read_only_check_error"] = fmt.Sprintf("transaction_read_only=%s，会话并非只读", ro)
 	}
 	return nil, out, nil
 }

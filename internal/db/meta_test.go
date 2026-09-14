@@ -398,6 +398,21 @@ func TestDetectPartitionSupport(t *testing.T) {
 		}
 	})
 
+	t.Run("探测返回0行", func(t *testing.T) {
+		inst, _ := newMockInstance(t, dbtest.WithQueryHook(func(q string) *dbtest.Result {
+			if strings.Contains(q, "parttype") {
+				return dbtest.Rows(nil) // 0 行：pg_class 无 parttype 列之外的形态
+			}
+			return nil
+		}))
+		if inst.detectPartitionSupport(ctx) {
+			t.Fatal("0 行探测应不支持分区")
+		}
+		if !inst.partitionResolved {
+			t.Fatal("成功探测（含 0 行）应缓存结果")
+		}
+	})
+
 	t.Run("支持分区", func(t *testing.T) {
 		inst, _ := newMockInstance(t, dbtest.WithPartitionSupport())
 		if !inst.detectPartitionSupport(ctx) {
@@ -413,6 +428,64 @@ func TestDetectPartitionSupport(t *testing.T) {
 		// sync.Once：第二次调用不再查询，直接返回缓存结果。
 		if !inst.detectPartitionSupport(ctx) {
 			t.Error("探测结果应被缓存")
+		}
+	})
+}
+
+// TestListTablesTruncationAndTotalCount 覆盖截断标记与 total_count 的成功/失败分支。
+func TestListTablesTruncationAndTotalCount(t *testing.T) {
+	ctx := context.Background()
+	bigResult := func() *dbtest.Result {
+		cols := []dbtest.Col{
+			dbtest.Text("schema_name", "public"), dbtest.Text("table_name", "t"),
+			dbtest.Text("kind", "table"), dbtest.Int8("estimated_rows", 1),
+			dbtest.Text("comment", ""),
+		}
+		rows := make([][]string, 5001)
+		for i := range rows {
+			rows[i] = []string{"public", "t", "table", "1", ""}
+		}
+		return dbtest.Rows(cols, rows...)
+	}
+
+	t.Run("total_count成功", func(t *testing.T) {
+		inst, _ := newMockInstance(t, dbtest.WithQueryHook(func(q string) *dbtest.Result {
+			if strings.Contains(q, "LIMIT 5001") {
+				return bigResult()
+			}
+			return nil
+		}))
+		lt, err := inst.ListTables(ctx, "", false)
+		if err != nil {
+			t.Fatalf("ListTables 失败: %v", err)
+		}
+		if lt["truncated"] != true || lt["count"] != 5000 {
+			t.Errorf("应截断为 5000 行: count=%v truncated=%v", lt["count"], lt["truncated"])
+		}
+		if tc, ok := lt["total_count"]; !ok || tc == nil {
+			t.Errorf("截断时应成功补报 total_count: %v", lt)
+		}
+	})
+
+	t.Run("total_count计数失败则省略", func(t *testing.T) {
+		inst, _ := newMockInstance(t, dbtest.WithQueryHook(func(q string) *dbtest.Result {
+			if strings.Contains(q, "LIMIT 5001") {
+				return bigResult()
+			}
+			if strings.Contains(q, "count(*)") {
+				return dbtest.ErrorResult("mock: 计数失败")
+			}
+			return nil
+		}))
+		lt, err := inst.ListTables(ctx, "", false)
+		if err != nil {
+			t.Fatalf("ListTables 失败: %v", err)
+		}
+		if lt["truncated"] != true || lt["count"] != 5000 {
+			t.Errorf("应截断为 5000 行: count=%v truncated=%v", lt["count"], lt["truncated"])
+		}
+		if _, ok := lt["total_count"]; ok {
+			t.Errorf("计数失败时不应有 total_count: %v", lt["total_count"])
 		}
 	})
 }

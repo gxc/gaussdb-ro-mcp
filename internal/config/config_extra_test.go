@@ -49,6 +49,27 @@ func TestBuildDSNWithOptions(t *testing.T) {
 	if !strings.HasSuffix(got, "application_name=mcp") {
 		t.Errorf("kv DSN 应空格追加 options: %s", got)
 	}
+
+	// 无 '=' 的 options 条目被忽略（URL 与 kv 两种形式一致）。
+	noEq := Instance{
+		Host: "h", Port: 5432, Database: "db",
+		SSLMode: "disable", Options: []string{"ignored"},
+	}
+	if got := noEq.BuildDSN(); strings.Contains(got, "ignored") {
+		t.Errorf("无 '=' 的 options 条目应被忽略: %s", got)
+	}
+	noEqURL := Instance{
+		DSN: "gaussdb://u@h/db?sslmode=disable", Options: []string{"ignored"},
+	}
+	if got := noEqURL.BuildDSN(); strings.Contains(got, "ignored") {
+		t.Errorf("URL DSN 中无 '=' 的 options 条目应被忽略: %s", got)
+	}
+
+	// 含控制字符（不可解析）的 URL DSN：appendOptions 走 kv 空格追加回退。
+	badURL := Instance{DSN: "gaussdb://h/db\n?foo=1", Options: []string{"application_name=mcp"}}
+	if got := badURL.BuildDSN(); !strings.HasSuffix(got, "application_name=mcp") {
+		t.Errorf("不可解析 URL 应空格追加 options: %q", got)
+	}
 }
 
 // TestEnsureSSLModeDirect 覆盖 sslmode 追加的全部分支。

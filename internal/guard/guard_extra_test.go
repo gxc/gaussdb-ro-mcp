@@ -192,6 +192,8 @@ func TestEscapeStringPrefixAdjacency(t *testing.T) {
 		`SELECT e, '\' FROM t`,       // 列名 e + 普通字符串（修复误拒方向）
 		`SELECT E'it\'s' FROM t`,     // 真正的 E'' 转义串
 		`SELECT U&'d\0061ta' FROM t`, // 真正的 U&'' 转义串
+		"SELECT e'it\\'s' FROM t",    // 小写 e 前缀
+		`SELECT u&'d\0061ta' FROM t`, // 小写 u 前缀
 		`SELECT abe, 'x' FROM t`,     // 以 e 结尾的标识符不触发转义
 		// 真实相邻的 E'' 与服务端解释一致（'\' 为转义引号，set_config 在双方看来都在
 		// 字符串内，不会执行），不属于边界错位，应放行：
