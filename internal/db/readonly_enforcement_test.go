@@ -112,3 +112,69 @@ func TestSelectRejectsWritesInReadOnlyTransaction(t *testing.T) {
 		t.Fatalf("只读事务内 SELECT 失败: %v", err)
 	}
 }
+
+// TestViewDefinitionAgainstRealInstance 验证视图定义回读能力：
+// 视图/物化视图返回 pretty 定义，普通表返回空串（openGauss/GaussDB 对
+// 非视图对象返回哨兵 "Not a view"，ViewDefinition 需按无定义处理）。
+func TestViewDefinitionAgainstRealInstance(t *testing.T) {
+	dsn := testDSN(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn, err := gaussdbgo.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("连接失败: %v", err)
+	}
+	defer conn.Close(ctx)
+	for _, s := range []string{
+		`DROP VIEW IF EXISTS public.__vv`,
+		`DROP MATERIALIZED VIEW IF EXISTS public.__mv`,
+		`DROP TABLE IF EXISTS public.__base CASCADE`,
+		`CREATE TABLE public.__base (id serial PRIMARY KEY, name text)`,
+		`INSERT INTO public.__base (name) VALUES ('a'), ('b')`,
+		`CREATE VIEW public.__vv AS SELECT id, name FROM public.__base WHERE id > 0`,
+		`CREATE MATERIALIZED VIEW public.__mv AS SELECT count(*) AS cnt FROM public.__base`,
+	} {
+		if _, err := conn.Exec(ctx, s); err != nil {
+			t.Fatalf("准备失败 %q: %v", s, err)
+		}
+	}
+
+	mgr, err := NewManager(ctx, &config.Config{
+		Server: config.Server{MaxRowsCap: 10000, ConnectTimeout: config.Duration(10 * time.Second)},
+		Instances: []*config.Instance{{
+			Name: "test", DSN: dsn, PoolMaxConns: 2, StatementTimeout: config.Duration(5 * time.Second),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("创建 Manager 失败: %v", err)
+	}
+	defer mgr.Close()
+	inst, _ := mgr.Resolve("test")
+
+	check := func(obj, wantKind string, wantViewdef bool) {
+		t.Helper()
+		oid, _, _, kind, err := inst.ResolveTable(ctx, "public", obj)
+		if err != nil {
+			t.Errorf("[%s] ResolveTable 失败: %v", obj, err)
+			return
+		}
+		if kind != wantKind {
+			t.Errorf("[%s] kind=%q, want %q", obj, kind, wantKind)
+		}
+		vd, err := inst.ViewDefinition(ctx, oid)
+		if err != nil {
+			t.Errorf("[%s] ViewDefinition 失败: %v", obj, err)
+			return
+		}
+		if (vd != "") != wantViewdef {
+			t.Errorf("[%s] viewdef 应为 %v，实际 %q", obj, wantViewdef, vd)
+		}
+		if wantViewdef && !strings.Contains(strings.ToUpper(vd), "SELECT") {
+			t.Errorf("[%s] viewdef 内容异常: %q", obj, vd)
+		}
+	}
+	check("__vv", "view", true)
+	check("__mv", "materialized view", true)
+	check("__base", "table", false)
+}

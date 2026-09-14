@@ -221,6 +221,7 @@ func (inst *Instance) DescribeIndexes(ctx context.Context, oid int64) ([]map[str
 }
 
 // ViewDefinition 返回视图/物化视图定义（pretty 格式）。
+// openGauss/GaussDB 对非视图对象返回哨兵字符串 "Not a view"，按无定义处理。
 func (inst *Instance) ViewDefinition(ctx context.Context, oid int64) (string, error) {
 	rows, err := inst.Query(ctx, "SELECT pg_catalog.pg_get_viewdef($1::oid, true) AS viewdef", oid)
 	if err != nil {
@@ -229,7 +230,10 @@ func (inst *Instance) ViewDefinition(ctx context.Context, oid int64) (string, er
 	if len(rows) == 0 {
 		return "", nil
 	}
-	return asString(rows[0]["viewdef"]), nil
+	if vd := asString(rows[0]["viewdef"]); vd != "Not a view" {
+		return vd, nil
+	}
+	return "", nil
 }
 
 // TableComment 返回表级注释与估算行数。
