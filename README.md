@@ -1,5 +1,7 @@
 # gaussdb-ro-mcp
 
+[![Glama](https://glama.ai/mcp/servers/gxc/gaussdb-ro-mcp/badges/score.svg)](https://glama.ai/mcp/servers/gxc/gaussdb-ro-mcp)
+
 面向 Coding Agent（Claude Code、OpenCode 等）的 **GaussDB 只读 MCP 服务器**。基于
 [GaussDB 官方 Go 驱动](https://github.com/huaweicloud-samples/database-gaussdb-go)
 （华为云官方开源的 pgx v5 适配版，源码随仓库内置于 `third_party/gaussdb-go`，支持离线构建），
