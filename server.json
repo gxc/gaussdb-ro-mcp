@@ -1,0 +1,10 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.gxc/gaussdb-ro-mcp",
+  "description": "Read-only MCP server for Huawei GaussDB (centralized & distributed), built for coding agents.",
+  "repository": {
+    "url": "https://github.com/gxc/gaussdb-ro-mcp",
+    "source": "github"
+  },
+  "version": "0.2.2"
+}
