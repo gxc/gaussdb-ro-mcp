@@ -1,0 +1,60 @@
+# 推送 vX.Y.Z tag 时在 GitHub Actions 上构建二进制并自动创建 Release（替代本地构建 + 手动上传）。
+# 产物平台：linux/amd64、linux/arm64、darwin/arm64、windows/amd64。
+# 产物文件名不带版本号——保证 releases/latest/download/<文件名> 固定链接始终可用（见 CLAUDE.md 发布流程）。
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # 创建 Release 并上传产物
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # 发布前置检查，与 PR 约定一致（go vet / go test，无需数据库，集成测试由 DSN 环境变量门控自动跳过）
+      - name: Vet & Test
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Build
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          mkdir -p dist
+          for platform in linux/amd64 linux/arm64 darwin/arm64 windows/amd64; do
+            os="${platform%/*}"
+            arch="${platform#*/}"
+            ext=""; [ "$os" = windows ] && ext=".exe"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+              go build -trimpath -ldflags "-s -w -X main.version=$VERSION" \
+              -o "dist/gaussdb-ro-mcp-$os-$arch$ext" ./cmd/gaussdb-ro-mcp
+          done
+
+      - name: SHA256SUMS
+        run: |
+          cd dist
+          sha256sum gaussdb-ro-mcp-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      # 说明由 GitHub 自动生成（提交列表 + 末尾 Full Changelog compare 链接）；
+      # 含安全修复需要加"建议所有用户尽快升级"时，发布后在 Release 页面编辑说明头部
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/gaussdb-ro-mcp-* \
+            dist/SHA256SUMS.txt \
+            --title "gaussdb-ro-mcp $GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag

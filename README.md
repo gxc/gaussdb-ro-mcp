@@ -31,14 +31,34 @@
 
 ## 安装
 
-从 [Releases](https://github.com/gxc/gaussdb-ro-mcp/releases) 下载对应架构的二进制，
-用 `install` 安装到 `/usr/local/bin`（其他架构或内网环境可自行构建，见下节）：
+从 [Releases](https://github.com/gxc/gaussdb-ro-mcp/releases) 下载对应平台的二进制
+（`linux-amd64` / `linux-arm64` / `darwin-arm64` / `windows-amd64.exe`；其他平台或内网环境可自行构建，见下节）。
+
+**Linux**：
 
 ```bash
 curl -LO https://github.com/gxc/gaussdb-ro-mcp/releases/latest/download/gaussdb-ro-mcp-linux-amd64
 sudo install -Dm 755 gaussdb-ro-mcp-linux-amd64 /usr/local/bin/gaussdb-ro-mcp
 gaussdb-ro-mcp --version
 ```
+
+**macOS**（Apple Silicon）：
+
+```bash
+curl -LO https://github.com/gxc/gaussdb-ro-mcp/releases/latest/download/gaussdb-ro-mcp-darwin-arm64
+sudo install -Dm 755 gaussdb-ro-mcp-darwin-arm64 /usr/local/bin/gaussdb-ro-mcp
+gaussdb-ro-mcp --version
+```
+
+**Windows**（PowerShell；放入 PATH 目录后即可直接调用）：
+
+```powershell
+Invoke-WebRequest -Uri "https://github.com/gxc/gaussdb-ro-mcp/releases/latest/download/gaussdb-ro-mcp-windows-amd64.exe" -OutFile "gaussdb-ro-mcp.exe"
+Move-Item .\gaussdb-ro-mcp.exe "$env:LOCALAPPDATA\Microsoft\WindowsApps\"  # 该目录默认在 PATH 中
+gaussdb-ro-mcp --version
+```
+
+各产物校验值见 Release 页的 `SHA256SUMS.txt`。
 
 ## 构建
 
@@ -51,6 +71,8 @@ go build -o gaussdb-ro-mcp ./cmd/gaussdb-ro-mcp
 sudo install -Dm 755 gaussdb-ro-mcp /usr/local/bin/gaussdb-ro-mcp
 gaussdb-ro-mcp --version
 ```
+
+交叉编译其他平台（纯 Go，`CGO_ENABLED=0` 即可）：`CGO_ENABLED=0 GOOS=<os> GOARCH=<arch> go build -o ... ./cmd/gaussdb-ro-mcp`。
 
 ## 配置
 

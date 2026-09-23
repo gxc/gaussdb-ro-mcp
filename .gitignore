@@ -34,3 +34,4 @@ go.work.sum
 # gaussdb-ro-mcp
 /gaussdb-ro-mcp
 gaussdb-ro-mcp.yaml
+/dist/

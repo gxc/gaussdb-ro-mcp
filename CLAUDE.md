@@ -63,11 +63,11 @@ third_party/gaussdb-go       GaussDB 官方 Go 驱动源码，经 go.mod replace
 
 ## 发布流程
 
-1. 构建产物：`CGO_ENABLED=0 GOOS=linux GOARCH=amd64|arm64 go build -trimpath -ldflags "-s -w -X main.version=vX.Y.Z" -o dist/gaussdb-ro-mcp-linux-<arch> ./cmd/gaussdb-ro-mcp`。**产物文件名不带版本号**——这样 `releases/latest/download/gaussdb-ro-mcp-linux-<arch>` 固定链接始终可用（文档/指南统一引用该链接）。重新生成 `dist/SHA256SUMS.txt` 并 `sha256sum -c` 校验；本地 `dist/` 替换为当版产物（旧版产物保留在对应 Release 页面）。
-2. 打 annotated tag 并推送：`git tag -a vX.Y.Z && git push origin vX.Y.Z`。
-3. `gh release create vX.Y.Z dist/... --title "gaussdb-ro-mcp vX.Y.Z" --notes-file -`；说明沿用既有格式，安装命令用 `sudo install -Dm 755` 装到 `/usr/local/bin`。
-4. **产物与文案约定**：架构名只用 `linux-amd64` / `linux-arm64`，ARM64 **不要**加"（鲲鹏/飞腾等）"之类的举例；含安全修复时在说明头部标注"建议所有用户尽快升级"。
-5. Release 说明末尾附 compare 链接（`/compare/v上一版...vX.Y.Z`）。
+1. 打 annotated tag 并推送：`git tag -a vX.Y.Z && git push origin vX.Y.Z`。
+2. `.github/workflows/release.yml` 自动完成剩余步骤：`go vet` + `go test` → 交叉编译 `linux-amd64` / `linux-arm64` / `darwin-arm64` / `windows-amd64.exe`（`CGO_ENABLED=0 -trimpath -ldflags "-s -w -X main.version=<tag>"`）→ 生成 `SHA256SUMS.txt` → `gh release create --generate-notes` 创建 Release 并上传产物（说明为自动生成的提交列表，末尾自带 Full Changelog compare 链接）。
+3. **产物与文案约定**：产物文件名不带版本号——`releases/latest/download/gaussdb-ro-mcp-<os>-<arch>[.exe]` 固定链接始终可用（文档/指南统一引用该链接）；平台名只用 `linux-amd64` / `linux-arm64` / `darwin-arm64` / `windows-amd64`（Windows 产物带 `.exe` 后缀），不要附加"（鲲鹏/飞腾等）"之类的举例。
+4. 含安全修复时，发布后在 Release 页面编辑说明，头部标注"建议所有用户尽快升级"（tag 触发的工作流无法携带输入，此步只能手动）。
+5. 本地构建（`go build -o gaussdb-ro-mcp ./cmd/gaussdb-ro-mcp`）仅用于自测或内网交付，不再作为发布途径。
 
 ## 关键约束
 
