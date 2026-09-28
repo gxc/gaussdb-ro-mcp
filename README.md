@@ -1,5 +1,6 @@
 # gaussdb-ro-mcp
 
+[![CI](https://github.com/gxc/gaussdb-ro-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/gxc/gaussdb-ro-mcp/actions/workflows/ci.yml)
 [![Glama](https://glama.ai/mcp/servers/gxc/gaussdb-ro-mcp/badges/score.svg)](https://glama.ai/mcp/servers/gxc/gaussdb-ro-mcp)
 
 面向 Coding Agent（Claude Code、OpenCode 等）的 **GaussDB 只读 MCP 服务器**。基于

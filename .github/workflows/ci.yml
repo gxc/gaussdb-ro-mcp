@@ -12,7 +12,9 @@ on:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true # 同一 PR/分支的新推送取消进行中的旧运行
+  # 仅 PR 取消旧运行；main 的连续合并保持排队完整执行，
+  # 避免上一次合并后的检查被下一次推送取消导致主分支状态缺失。
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -20,6 +22,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 20 # 挂起的 govulncheck/构建不应烧掉默认 360 分钟 runner 时间
     steps:
       - uses: actions/checkout@v7
 
@@ -28,10 +31,11 @@ jobs:
           go-version-file: go.mod
 
       # 集成测试由 GAUSSDB_RO_MCP_TEST_DSN 环境变量门控，未设置自动跳过（与本地/发布一致）
+      # -race：连接池/stdio 服务/mock 服务端均有并发逻辑，单测仅数秒，race 开销可接受
       - name: Vet & Test
         run: |
           go vet ./...
-          go test ./...
+          go test -race ./...
 
       - name: Cross-compile (release platforms)
         run: |
