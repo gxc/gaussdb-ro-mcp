@@ -1,5 +1,7 @@
 # gaussdb-ro-mcp
 
+[简体中文] | [English](README_en.md)
+
 [![CI](https://github.com/gxc/gaussdb-ro-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/gxc/gaussdb-ro-mcp/actions/workflows/ci.yml)
 [![Glama](https://glama.ai/mcp/servers/gxc/gaussdb-ro-mcp/badges/score.svg)](https://glama.ai/mcp/servers/gxc/gaussdb-ro-mcp)
 
