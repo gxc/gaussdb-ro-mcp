@@ -1,6 +1,6 @@
 module gaussdb-ro-mcp
 
-go 1.26.7
+go 1.26.9
 
 require (
 	github.com/HuaweiCloudDeveloper/gaussdb-go v0.0.0-00010101000000-000000000000
