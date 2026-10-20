@@ -4,6 +4,8 @@
 
 [![CI](https://github.com/gxc/gaussdb-ro-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/gxc/gaussdb-ro-mcp/actions/workflows/ci.yml)
 [![Glama](https://glama.ai/mcp/servers/gxc/gaussdb-ro-mcp/badges/score.svg)](https://glama.ai/mcp/servers/gxc/gaussdb-ro-mcp)
+[![Release](https://img.shields.io/github/v/release/gxc/gaussdb-ro-mcp)](https://github.com/gxc/gaussdb-ro-mcp/releases/latest)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 
 A **read-only MCP server for GaussDB**, designed for coding agents (Claude Code, OpenCode, etc.).
 It is built on the [official GaussDB Go driver](https://github.com/huaweicloud-samples/database-gaussdb-go)

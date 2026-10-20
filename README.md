@@ -4,6 +4,8 @@
 
 [![CI](https://github.com/gxc/gaussdb-ro-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/gxc/gaussdb-ro-mcp/actions/workflows/ci.yml)
 [![Glama](https://glama.ai/mcp/servers/gxc/gaussdb-ro-mcp/badges/score.svg)](https://glama.ai/mcp/servers/gxc/gaussdb-ro-mcp)
+[![Release](https://img.shields.io/github/v/release/gxc/gaussdb-ro-mcp)](https://github.com/gxc/gaussdb-ro-mcp/releases/latest)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 
 面向 Coding Agent（Claude Code、OpenCode 等）的 **GaussDB 只读 MCP 服务器**。基于
 [GaussDB 官方 Go 驱动](https://github.com/huaweicloud-samples/database-gaussdb-go)

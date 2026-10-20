@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#0f172a"/>
+  <!-- database cylinder -->
+  <rect x="136" y="150" width="240" height="212" fill="#38bdf8"/>
+  <ellipse cx="256" cy="362" rx="120" ry="48" fill="#38bdf8"/>
+  <ellipse cx="256" cy="150" rx="120" ry="48" fill="#7dd3fc"/>
+  <!-- read-only check -->
+  <rect x="316" y="312" width="64" height="36" rx="12" fill="#22c55e" transform="rotate(-45 348 330)"/>
+  <rect x="332" y="312" width="148" height="36" rx="12" fill="#22c55e" transform="rotate(45 406 330)"/>
+</svg>
