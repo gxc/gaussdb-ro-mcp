@@ -33,6 +33,26 @@ config file supports managing multiple GaussDB instances at once.
 
 All tools accept an optional `instance` parameter to select the data source; `default_instance` is used when omitted.
 
+## How It Compares
+
+| | gaussdb-ro-mcp (this project) | [GaussDB-MCP](https://github.com/mengqi1436/GaussDB-MCP) | [Multi DB MCP](https://github.com/the-Rings/universal-db-mcp) | Generic PostgreSQL MCP servers |
+| --- | --- | --- | --- | --- |
+| Positioning | **Read-only** exploration, GaussDB-specific | Full-featured GaussDB access: queries, writes, transactions, diagnostics, user administration | Universal connector for 17 databases (incl. GaussDB/openGauss), MCP + REST API | Vanilla PostgreSQL |
+| GaussDB adaptation | Official Go driver; centralized/standby/distributed editions all covered | Official Node.js driver (gaussdb-node) | Via the generic PostgreSQL protocol | No adaptation for GaussDB-specific catalogs (e.g. `pg_partition`) |
+| Read-only guarantee | Three-layer defense in depth: static SQL validation + transaction-level READ ONLY enforcement + least-privilege guidance | No read-only mode (default `root` admin account; writes are by design) | Application-level read-only by default | Varies by project |
+| GaussDB-specific metadata | Partitioned tables (`pg_partition`), foreign tables, materialized views, view definition SQL, full index definitions | Partial | Probed via the PG protocol; partial | None |
+| Runtime dependency | None (statically compiled single binary, offline-friendly) | Node.js ≥ 20 | Node.js (npx) | Varies |
+| Multi-instance management | Centralized config for multiple instances, switchable via the `instance` parameter | Single instance (environment variables) | Single connection (startup args) | Usually single instance |
+| Intranet non-SSL | `sslmode=disable` by default | Supported (SSL off by default) | Supported | Supported |
+| License | Apache-2.0 | Not declared | Not declared | Varies |
+
+These projects serve different purposes: a full-featured server is a fair choice when you
+need complete read/write and operations capability. If the goal is letting a coding agent
+explore data **safely** — especially on production databases — read-only constraints and
+defense in depth are what this project is for. The information above is compiled from the
+public READMEs of each project (Oct 2026); corrections are welcome via
+[an issue](https://github.com/gxc/gaussdb-ro-mcp/issues).
+
 ## Installation
 
 Download the binary for your platform from
