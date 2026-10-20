@@ -20,8 +20,10 @@ type instanceArg struct {
 // Register 向 MCP 服务器注册全部只读工具。
 func Register(s *mcp.Server, m *db.Manager) {
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "test_connection",
-		Description: "测试 GaussDB 数据源连通性，返回服务器版本、当前数据库、用户、只读状态与连接耗时。不指定 instance 时测试默认实例。",
+		Name: "test_connection",
+		Description: "测试 GaussDB 数据源连通性，返回服务器版本、当前数据库、用户、只读状态与连接耗时。" +
+			"建议在会话开始或其他工具调用前先执行，确认数据源可达且只读事务生效；也用于排查连接、凭据或超时问题。" +
+			"不指定 instance 时测试默认实例。",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in struct {
 		instanceArg
 	}) (*mcp.CallToolResult, any, error) {
@@ -29,8 +31,10 @@ func Register(s *mcp.Server, m *db.Manager) {
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "list_schemas",
-		Description: "列出 GaussDB 数据库中的 schema（模式）清单，含每个模式下的对象数量与注释。默认排除系统模式。",
+		Name: "list_schemas",
+		Description: "列出 GaussDB 数据库中的 schema（模式）清单，含每个模式下的对象数量与注释，默认排除系统模式。" +
+			"适用场景：探查数据库的第一步——先确定业务模式名称，再用 list_tables 查看其中的表。" +
+			"include_system 为 true 时包含 pg_catalog、information_schema 等系统模式（一般仅在排查系统对象时需要）。",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in struct {
 		instanceArg
 		IncludeSystem bool `json:"include_system,omitempty" jsonschema:"是否包含系统模式（pg_catalog 等），默认 false"`
@@ -39,8 +43,10 @@ func Register(s *mcp.Server, m *db.Manager) {
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "list_tables",
-		Description: "列出 GaussDB 数据库中的表和视图清单（表名、类型、估算行数、注释）。可通过 schema 参数过滤到指定模式。",
+		Name: "list_tables",
+		Description: "列出 GaussDB 数据库中的表和视图清单：名称、类型（表/视图/物化视图/分区表/外表）、估算行数与注释。" +
+			"schema 参数可过滤到指定模式（可来自 list_schemas 的结果），省略时扫描全部非系统模式。" +
+			"适用场景：定位目标表后，用 describe_table 查看结构或用 execute_select 抽样查询。大型库建议传 schema 缩小扫描范围。",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in struct {
 		instanceArg
 		Schema        string `json:"schema,omitempty" jsonschema:"限定模式名（schema），省略时扫描全部非系统模式"`
@@ -50,19 +56,25 @@ func Register(s *mcp.Server, m *db.Manager) {
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "describe_table",
-		Description: "查看表/视图的完整结构：列清单（类型/可空/默认值/注释）、主键与约束、全部索引及其定义；视图返回视图定义 SQL，分区表返回分区清单。",
+		Name: "describe_table",
+		Description: "查看表/视图的完整结构：列清单（类型/可空/默认值/注释）、主键与约束、全部索引及其定义；" +
+			"视图返回视图定义 SQL，分区表返回分区清单。" +
+			"适用场景：编写或校对查询前了解表结构、关联键与索引设计。table 为必填（可来自 list_tables 的结果）；" +
+			"schema 省略时自动在非系统模式中查找，存在同名表时请显式指定 schema。",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in struct {
 		instanceArg
-		Schema string `json:"schema,omitempty" jsonschema:"模式名，省略时自动在非系统模式中查找（歧义时报错）"`
-		Table  string `json:"table" jsonschema:"表名或视图名（必填）"`
+		Schema string `json:"schema,omitempty" jsonschema:"模式名，可来自 list_schemas 的结果；省略时自动在非系统模式中查找（歧义时报错）"`
+		Table  string `json:"table" jsonschema:"表名或视图名（必填），可来自 list_tables 的结果"`
 	}) (*mcp.CallToolResult, any, error) {
 		return handleDescribeTable(ctx, m, in.Instance, in.Schema, in.Table)
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "execute_select",
-		Description: "执行只读 SELECT 查询（唯一允许的 SQL 入口）。仅接受单条 SELECT/WITH 语句：禁止 DML/DDL、SELECT INTO、行锁、多语句与危险函数；查询在服务端强制的只读事务中执行。",
+		Name: "execute_select",
+		Description: "执行只读 SELECT 查询（本服务器唯一允许的 SQL 入口）。仅接受单条 SELECT/WITH 语句：" +
+			"拒绝 DML/DDL、SELECT INTO、FOR UPDATE/SHARE 行锁、多语句与危险函数；查询在服务端强制的只读事务中执行。" +
+			"适用场景：在 list_tables/describe_table 定位目标后做数据探查与统计（计数、聚合、抽样、排序取前 N 行）。" +
+			"max_rows 控制本次返回行数（默认取实例配置，受服务端硬上限约束）；大结果集建议用 LIMIT 或聚合减少传输。",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in struct {
 		instanceArg
 		SQL     string `json:"sql" jsonschema:"要执行的 SELECT 语句（必填），仅允许单条 SELECT/WITH 查询"`
