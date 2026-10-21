@@ -33,7 +33,7 @@ config file supports managing multiple GaussDB instances at once.
 | `describe_table` | Table structure: columns (type/nullability/default/comment), primary keys and constraints, **all indexes with definitions**; views return the view definition SQL; partitioned tables return the partition list (GaussDB `pg_partition`) |
 | `execute_select` | Run a SELECT: accepts a single SELECT/WITH only, subject to `max_rows`/timeout limits; returns column names, rows, and a truncation flag |
 
-All tools accept an optional `instance` parameter to select the data source; `default_instance` is used when omitted.
+All tools accept an optional `instance` parameter to select the data source; `default_instance` is used when omitted. The full instance list (with the default marked) is embedded in the parameter's schema description, so agents discover the available instances from the tool list without trial and error.
 
 ## How It Compares
 
