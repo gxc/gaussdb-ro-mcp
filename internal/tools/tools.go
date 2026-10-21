@@ -96,7 +96,7 @@ func Register(s *mcp.Server, m *db.Manager) {
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "list_schemas",
+		Name: "list_schemas",
 		Description: "列出 GaussDB 数据库中的 schema（模式）清单，含每个模式下的对象数量与注释，默认排除系统模式。" +
 			"适用场景：探查数据库的第一步——先确定业务模式名称，再用 list_tables 查看其中的表。" +
 			"include_system 为 true 时包含 pg_catalog、information_schema 等系统模式（一般仅在排查系统对象时需要）。",
@@ -106,7 +106,7 @@ func Register(s *mcp.Server, m *db.Manager) {
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "list_tables",
+		Name: "list_tables",
 		Description: "列出 GaussDB 数据库中的表和视图清单：名称、类型（表/视图/物化视图/分区表/外表）、估算行数与注释。" +
 			"schema 参数可过滤到指定模式（可来自 list_schemas 的结果），省略时扫描全部非系统模式。" +
 			"适用场景：定位目标表后，用 describe_table 查看结构或用 execute_select 抽样查询。大型库建议传 schema 缩小扫描范围。",
@@ -116,7 +116,7 @@ func Register(s *mcp.Server, m *db.Manager) {
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "describe_table",
+		Name: "describe_table",
 		Description: "查看表/视图的完整结构：列清单（类型/可空/默认值/注释）、主键与约束、全部索引及其定义；" +
 			"视图返回视图定义 SQL，分区表返回分区清单。" +
 			"适用场景：编写或校对查询前了解表结构、关联键与索引设计。table 为必填（可来自 list_tables 的结果）；" +
@@ -127,7 +127,7 @@ func Register(s *mcp.Server, m *db.Manager) {
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "execute_select",
+		Name: "execute_select",
 		Description: "执行只读 SELECT 查询（本服务器唯一允许的 SQL 入口）。仅接受单条 SELECT/WITH 语句：" +
 			"拒绝 DML/DDL、SELECT INTO、FOR UPDATE/SHARE 行锁、多语句与危险函数；查询在服务端强制的只读事务中执行。" +
 			"适用场景：在 list_tables/describe_table 定位目标后做数据探查与统计（计数、聚合、抽样、排序取前 N 行）。" +

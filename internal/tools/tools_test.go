@@ -130,6 +130,24 @@ func TestHandleTestConnection(t *testing.T) {
 		!strings.Contains(err.Error(), "连接失败") {
 		t.Errorf("ServerInfo 失败应报连接失败: %v", err)
 	}
+
+	// ServerInfo 成功但 ReadOnlyStatus 失败 → 报“只读事务校验失败”，不给 ok=true。
+	// 按出现次序计数 SHOW 校验语句：ServerInfo 仅 1 次校验放行，第 2 次起报错，
+	// 使失败精确落在 ReadOnlyStatus 自身的查询里。
+	shows := 0
+	badRO := newMockManager(t, dbtest.WithQueryHook(func(q string) *dbtest.Result {
+		if strings.Contains(q, "transaction_read_only") {
+			shows++
+			if shows >= 2 {
+				return dbtest.ErrorResult("mock: show 失败")
+			}
+		}
+		return nil
+	}))
+	if _, _, err := handleTestConnection(ctx, badRO, testConnectionIn{}); err == nil ||
+		!strings.Contains(err.Error(), "只读事务校验失败") {
+		t.Errorf("ReadOnlyStatus 失败应报只读事务校验失败: %v", err)
+	}
 }
 
 // TestHandleListSchemas 验证 schema 清单工具。
@@ -342,6 +360,28 @@ func TestHandleExecuteSelect(t *testing.T) {
 			t.Errorf("超上限 max_rows 不应报错: %v", err3)
 		} else {
 			_ = res3 // 仅覆盖钳制分支
+		}
+	})
+
+	t.Run("提交失败附警告", func(t *testing.T) {
+		// 结果已完整取回、仅 COMMIT 失败：结果连同 warning 一并返回（回归
+		// issue #4 在工具层的呈现——已收行不得丢弃）。
+		mgr := newMockManager(t, dbtest.WithQueryHook(func(q string) *dbtest.Result {
+			if q == "COMMIT" {
+				return dbtest.ErrorResult("mock: 提交失败")
+			}
+			return nil
+		}))
+		_, res, err := handleExecuteSelect(ctx, mgr, "", "SELECT 1", 0)
+		if err != nil {
+			t.Fatalf("结果已取回时不应整体报错: %v", err)
+		}
+		out := asMap(t, res)
+		if msg, ok := out["warning"].(string); !ok || !strings.Contains(msg, "提交只读事务失败") {
+			t.Errorf("应附提交失败警告: %v", out)
+		}
+		if out["row_count"] != 2 {
+			t.Errorf("已取回的行不应丢弃: %v", out)
 		}
 	})
 

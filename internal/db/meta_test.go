@@ -579,8 +579,9 @@ func TestNormalizeFloatNonFinite(t *testing.T) {
 	}
 }
 
-// TestReadOnlyStatusFailureModes 覆盖 ReadOnlyStatus 的查询错误与空结果分支
-// （SHOW 在只读事务内执行，仅计算一次，直接注入失败/空结果即可）。
+// TestReadOnlyStatusFailureModes 覆盖 ReadOnlyStatus 的查询错误与空结果分支。
+// SHOW 在只读事务内被执行两次（事务内校验 + 业务查询本身），按出现次数
+// 注入失败/空结果以精确命中目标分支。
 func TestReadOnlyStatusFailureModes(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -598,16 +599,21 @@ func TestReadOnlyStatusFailureModes(t *testing.T) {
 	})
 
 	t.Run("空结果", func(t *testing.T) {
+		// 第 1 次 SHOW 是事务内校验（放行返回 on），第 2 次是业务 SHOW 本身：
+		// 让后者返回 0 行，命中 ReadOnlyStatus 的空结果分支（而非被校验
+		// fail-closed 前置拦截）。
+		shows := 0
 		inst, _ := newMockInstance(t, dbtest.WithQueryHook(func(q string) *dbtest.Result {
 			if strings.Contains(strings.ToUpper(q), "TRANSACTION_READ_ONLY") {
-				return dbtest.Rows(nil)
+				shows++
+				if shows >= 2 {
+					return dbtest.Rows(nil)
+				}
 			}
 			return nil
 		}))
-		// 0 行 SHOW 属于故障形态：被 queryReadOnly 的事务内校验先行拦截
-		//（fail-closed），错误信息包含校验失败说明。
-		if _, err := inst.ReadOnlyStatus(ctx); err == nil || !strings.Contains(err.Error(), "校验事务只读状态失败") {
-			t.Fatalf("0 行 SHOW 应被 fail-closed 拦截: %v", err)
+		if _, err := inst.ReadOnlyStatus(ctx); err == nil || !strings.Contains(err.Error(), "空结果") {
+			t.Fatalf("业务 SHOW 返回 0 行应报空结果: %v", err)
 		}
 	})
 }
