@@ -250,6 +250,9 @@ func cleanupTx(ctx context.Context, c *gaussdbxpool.Conn) {
 // ensureIdleTx 确保连接不处于（活动或中止的）残留事务中：对活动事务执行
 // BEGIN 只产生 WARNING 不报错，后续查询会被并入外来事务、COMMIT 替人提交，
 // 故在开启只读事务前按协议状态位先行清理。
+// 注：gaussdbxpool 在 Release 时会销毁 TxStatus != 'I' 的连接，本清理属
+// 双保险（防驱动/池行为变化或服务端复用交付的脏会话），进程内无法构造
+// 命中它的正常路径，相应分支由 code review 保证。
 func ensureIdleTx(ctx context.Context, c *gaussdbxpool.Conn) error {
 	if c.Conn().GaussdbConn().TxStatus() == 'I' {
 		return nil
