@@ -3,7 +3,7 @@
   "name": "io.github.gxc/gaussdb-ro-mcp",
   "title": "GaussDB Read-Only MCP",
   "description": "Read-only MCP server for Huawei GaussDB (centralized & distributed), built for coding agents.",
-  "version": "0.2.2",
+  "version": "0.2.6",
   "websiteUrl": "https://github.com/gxc/gaussdb-ro-mcp#readme",
   "icons": [
     {
