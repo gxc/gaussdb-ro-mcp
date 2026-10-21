@@ -90,7 +90,7 @@ Checksums for each artifact are available in `SHA256SUMS.txt` on the Release pag
 
 ## Building
 
-Requires Go 1.26+ (matching go.mod). The driver source is vendored in `third_party/gaussdb-go`
+Requires Go 1.26.10+ (matching go.mod). The driver source is vendored in `third_party/gaussdb-go`
 (referenced via a `replace` directive); with network access, `go build` resolves the remaining
 dependencies automatically. In a fully air-gapped environment, first run `go mod vendor` on a
 networked machine, then carry the `vendor/` directory over and build with `go build -mod=vendor`.
