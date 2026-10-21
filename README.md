@@ -39,7 +39,7 @@
 | `describe_table` | 表结构：列（类型/可空/默认值/注释）、主键与约束、**全部索引及定义**；视图返回视图定义 SQL；分区表返回分区清单（GaussDB `pg_partition`） |
 | `execute_select` | 执行 SELECT：仅接受单条 SELECT/WITH，受 `max_rows`/超时限制，返回列名+行数据+是否截断 |
 
-所有工具均接受可选 `instance` 参数以选择数据源，缺省使用 `default_instance`。
+所有工具均接受可选 `instance` 参数以选择数据源，缺省使用 `default_instance`。全部实例名（含默认标注）会写入该参数的 schema 描述，agent 在获取工具列表阶段即可发现可选实例，无需试错。
 
 ## 与同类项目对比
 

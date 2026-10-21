@@ -2,12 +2,14 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"gaussdb-ro-mcp/internal/config"
 	"gaussdb-ro-mcp/internal/db"
 	"gaussdb-ro-mcp/internal/dbtest"
 )
@@ -98,7 +100,7 @@ func TestHandleTestConnection(t *testing.T) {
 	mgr := newMockManager(t)
 	ctx := context.Background()
 
-	_, res, err := handleTestConnection(ctx, mgr, struct{ instanceArg }{})
+	_, res, err := handleTestConnection(ctx, mgr, testConnectionIn{})
 	if err != nil {
 		t.Fatalf("test_connection 失败: %v", err)
 	}
@@ -113,7 +115,7 @@ func TestHandleTestConnection(t *testing.T) {
 		t.Errorf("缺少版本/库/用户信息: %v", out)
 	}
 
-	if _, _, err := handleTestConnection(ctx, mgr, struct{ instanceArg }{instanceArg{Instance: "nope"}}); err == nil {
+	if _, _, err := handleTestConnection(ctx, mgr, testConnectionIn{instanceArg{Instance: "nope"}}); err == nil {
 		t.Error("未知实例应报错")
 	}
 
@@ -124,7 +126,7 @@ func TestHandleTestConnection(t *testing.T) {
 		}
 		return nil
 	}))
-	if _, _, err := handleTestConnection(ctx, bad, struct{ instanceArg }{}); err == nil ||
+	if _, _, err := handleTestConnection(ctx, bad, testConnectionIn{}); err == nil ||
 		!strings.Contains(err.Error(), "连接失败") {
 		t.Errorf("ServerInfo 失败应报连接失败: %v", err)
 	}
@@ -377,7 +379,7 @@ func TestHandleExecuteSelect(t *testing.T) {
 func TestHandleTestConnectionReadOnlyOff(t *testing.T) {
 	// SHOW 返回 off：模拟 SET LOCAL 被剥离/未生效的形态。
 	mgr := newMockManager(t, dbtest.WithShowValues("off"))
-	_, _, err := handleTestConnection(context.Background(), mgr, struct{ instanceArg }{})
+	_, _, err := handleTestConnection(context.Background(), mgr, testConnectionIn{})
 	if err == nil || !strings.Contains(err.Error(), "只读事务校验失败") {
 		t.Fatalf("只读未生效时 test_connection 应报校验失败，实际: %v", err)
 	}
@@ -393,7 +395,7 @@ func TestHandleTestConnectionReadOnlyOff(t *testing.T) {
 		}
 		return nil
 	}))
-	_, _, err2 := handleTestConnection(ctx, mgr2, struct{ instanceArg }{})
+	_, _, err2 := handleTestConnection(ctx, mgr2, testConnectionIn{})
 	if err2 == nil || !strings.Contains(err2.Error(), "校验事务只读状态失败") {
 		t.Fatalf("SHOW 查询失败应报校验失败，实际: %v", err2)
 	}
@@ -424,4 +426,77 @@ func TestHandleDescribeTablePartialErrors(t *testing.T) {
 			t.Errorf("缺少 %s 键（失败被静默吞掉）: %v", key, out)
 		}
 	}
+}
+
+// TestRegisterInstanceDiscovery 验证每个工具 instance 参数的 schema 描述内嵌
+// 实例清单：按配置声明顺序排列并标注默认实例，agent 在 tools/list 阶段即可
+// 发现可选实例，无需靠传错实例名的报错来试探。
+func TestRegisterInstanceDiscovery(t *testing.T) {
+	// 双实例（指向同一 mock），默认实例取后者：同时验证顺序与（默认）标注位置。
+	f := dbtest.Start(t)
+	cfg := f.NewConfig()
+	second := &config.Instance{}
+	*second = *cfg.Instances[0]
+	second.Name = "report"
+	cfg.Instances = append(cfg.Instances, second)
+	cfg.DefaultInstance = "report"
+	mgr, err := db.NewManager(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("创建 Manager 失败: %v", err)
+	}
+	t.Cleanup(mgr.Close)
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0"}, nil)
+	Register(server, mgr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	st, ct := mcp.NewInMemoryTransports()
+	go func() { _ = server.Run(ctx, st) }()
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("连接 MCP 会话失败: %v", err)
+	}
+	defer cs.Close()
+
+	list, err := cs.ListTools(ctx, &mcp.ListToolsParams{})
+	if err != nil {
+		t.Fatalf("ListTools 失败: %v", err)
+	}
+	if len(list.Tools) != 5 {
+		t.Fatalf("应有 5 个工具，实际 %d", len(list.Tools))
+	}
+	for _, tool := range list.Tools {
+		// InputSchema 经协议层编解码为通用 JSON，取 properties.instance.description。
+		var s struct {
+			Properties map[string]struct {
+				Description string `json:"description"`
+			} `json:"properties"`
+		}
+		b, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			t.Fatalf("序列化 %s 的 InputSchema 失败: %v", tool.Name, err)
+		}
+		if err := json.Unmarshal(b, &s); err != nil {
+			t.Fatalf("解析 %s 的 InputSchema 失败: %v", tool.Name, err)
+		}
+		desc := s.Properties["instance"].Description
+		if !strings.Contains(desc, "可选实例：mock、report（默认）") {
+			t.Errorf("工具 %s 的 instance 描述应内嵌按声明顺序的实例清单并标注默认实例，实际: %q", tool.Name, desc)
+		}
+	}
+}
+
+// TestSchemaForBadType 覆盖 schemaFor 的推断失败分支：不支持的类型按注册期
+// 致命错误 panic（与 AddTool 自身的 panic 风格一致）。
+func TestSchemaForBadType(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("不支持的字段类型应 panic")
+		}
+	}()
+	schemaFor[struct {
+		Ch chan int `json:"ch"`
+	}]("desc")
 }

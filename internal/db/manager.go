@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +51,9 @@ type Manager struct {
 	guard   *guard.Guard
 	defName string
 	insts   map[string]*Instance
+	// names 按配置声明顺序持有实例名：map 遍历无序，而工具 schema 描述与
+	// 未知实例报错需要稳定可复现的清单顺序。
+	names []string
 }
 
 // NewManager 为配置中的每个实例创建连接池。
@@ -68,6 +72,7 @@ func NewManager(ctx context.Context, cfg *config.Config) (*Manager, error) {
 			return nil, fmt.Errorf("初始化实例 %q 失败: %w", icfg.Name, err)
 		}
 		m.insts[icfg.Name] = inst
+		m.names = append(m.names, icfg.Name)
 	}
 	return m, nil
 }
@@ -146,13 +151,14 @@ func (m *Manager) Resolve(name string) (*Instance, error) {
 	return inst, nil
 }
 
-// InstanceNames 返回全部实例名。
+// InstanceNamesList 按配置声明顺序返回全部实例名。
+func (m *Manager) InstanceNamesList() []string {
+	return slices.Clone(m.names)
+}
+
+// InstanceNames 返回全部实例名（逗号分隔，按配置声明顺序）。
 func (m *Manager) InstanceNames() string {
-	names := make([]string, 0, len(m.insts))
-	for n := range m.insts {
-		names = append(names, n)
-	}
-	return strings.Join(names, ", ")
+	return strings.Join(m.names, ", ")
 }
 
 // DefaultInstanceName 返回默认实例名。

@@ -19,6 +19,34 @@ func newMockInstance(t *testing.T, opts ...dbtest.Option) (*Instance, *dbtest.Se
 	return newMockInstanceCfg(t, nil, opts...)
 }
 
+// TestInstanceNamesOrder 验证实例名清单按配置声明顺序输出（map 遍历无序，
+// 而 schema 描述与未知实例报错需要稳定可复现的顺序）。
+func TestInstanceNamesOrder(t *testing.T) {
+	f := dbtest.Start(t)
+	cfg := f.NewConfig()
+	for _, name := range []string{"zeta", "alpha"} {
+		extra := &config.Instance{}
+		*extra = *cfg.Instances[0]
+		extra.Name = name
+		cfg.Instances = append(cfg.Instances, extra)
+	}
+	mgr, err := NewManager(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("创建 Manager 失败: %v", err)
+	}
+	t.Cleanup(mgr.Close)
+
+	if got := mgr.InstanceNamesList(); strings.Join(got, ",") != "mock,zeta,alpha" {
+		t.Errorf("InstanceNamesList 应按声明顺序，实际 %v", got)
+	}
+	if got := mgr.InstanceNames(); got != "mock, zeta, alpha" {
+		t.Errorf("InstanceNames 应按声明顺序拼接，实际 %q", got)
+	}
+	if inst, err := mgr.Resolve(""); err != nil || inst.Name != "mock" {
+		t.Errorf("空名应解析到默认实例 mock，实际 %v, %v", inst, err)
+	}
+}
+
 // newMockInstanceCfg 在 newMockInstance 基础上允许在建实例前修改配置
 // （如覆盖 StatementTimeout），避免各测试手写装配序列。
 func newMockInstanceCfg(t *testing.T, mutate func(*config.Config), opts ...dbtest.Option) (*Instance, *dbtest.Server) {
