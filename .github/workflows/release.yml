@@ -46,8 +46,7 @@ jobs:
           sha256sum gaussdb-ro-mcp-* > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-      # 说明由 GitHub 自动生成（提交列表 + 末尾 Full Changelog compare 链接）；
-      # 含安全修复需要加"建议所有用户尽快升级"时，发布后在 Release 页面编辑说明头部
+      # 说明由 GitHub 自动生成（提交列表 + 末尾 Full Changelog compare 链接）
       - name: Create Release
         env:
           GH_TOKEN: ${{ github.token }}
