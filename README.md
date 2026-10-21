@@ -7,6 +7,13 @@
 [![Release](https://img.shields.io/github/v/release/gxc/gaussdb-ro-mcp)](https://github.com/gxc/gaussdb-ro-mcp/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 
+> [!NOTE]
+> **English**: A read-only MCP server for Huawei GaussDB (centralized & distributed), built for
+> coding agents (Claude Code, OpenCode, etc.). Three layers of read-only enforcement — static SQL
+> validation, server-side `READ ONLY` transactions, and least-privilege account guidance — in a
+> single static binary designed for non-SSL intranet environments. Full documentation:
+> [README_en.md](README_en.md).
+
 面向 Coding Agent（Claude Code、OpenCode 等）的 **GaussDB 只读 MCP 服务器**。基于
 [GaussDB 官方 Go 驱动](https://github.com/huaweicloud-samples/database-gaussdb-go)
 （华为云官方开源的 pgx v5 适配版，源码随仓库内置于 `third_party/gaussdb-go`，支持离线构建），
