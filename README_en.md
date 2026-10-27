@@ -57,6 +57,13 @@ public READMEs of each project (Oct 2026); corrections are welcome via
 
 ## Installation
 
+**macOS / Linux (Homebrew)**:
+
+```bash
+brew install gxc/tap/gaussdb-ro-mcp
+gaussdb-ro-mcp --version
+```
+
 Download the binary for your platform from
 [Releases](https://github.com/gxc/gaussdb-ro-mcp/releases)
 (`linux-amd64` / `linux-arm64` / `darwin-arm64` / `windows-amd64.exe`; for other platforms or

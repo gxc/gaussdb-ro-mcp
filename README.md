@@ -61,6 +61,13 @@ Coding Agent **安全地**探查数据（尤其在生产库上），只读约束
 
 ## 安装
 
+**macOS / Linux（Homebrew）**：
+
+```bash
+brew install gxc/tap/gaussdb-ro-mcp
+gaussdb-ro-mcp --version
+```
+
 从 [Releases](https://github.com/gxc/gaussdb-ro-mcp/releases) 下载对应平台的二进制
 （`linux-amd64` / `linux-arm64` / `darwin-arm64` / `windows-amd64.exe`；其他平台或内网环境可自行构建，见下节）。
 
